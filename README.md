@@ -17,6 +17,10 @@ The cohort contains four accounts: `thelarklan`, `larkbot-codex`, `larkbot-claud
 - `bin/pr-review-update`: Fast-forwards the repository clone from `origin/main` and runs verification.
 - `hosts/`: Per-role environment configuration (`codex`, `claude`, `gemini`, `services`).
 - `install.sh`: Prepares directories and installs the managed crontab block for a selected role.
+- `github/`: The GitHub App manifest and the repository ruleset template.
+- `scripts/create-app.sh`: Creates the GitHub App from the manifest and writes its private config.
+- `scripts/enroll-repo.sh`: Applies merge settings, bot access, and the ruleset to one repository.
+- `docs/recreate.md`: Rebuilds the whole system from this repository.
 
 ## Install a host role
 

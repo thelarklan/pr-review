@@ -4,6 +4,14 @@ set -euo pipefail
 project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd -- "$project_dir"
 
+# Cron and the tests run these files directly, so each one needs the execute bit.
+for program in bin/* install.sh scripts/*.sh; do
+    if [[ ! -x "$program" ]]; then
+        printf 'verify.sh: %s is not executable; run chmod 0755 on it\n' "$program" >&2
+        exit 1
+    fi
+done
+
 shellcheck -x bin/* install.sh scripts/*.sh test/*.sh
 
 python3 - <<'PY'

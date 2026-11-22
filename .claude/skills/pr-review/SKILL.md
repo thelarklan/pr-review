@@ -1,57 +1,52 @@
 ---
 name: pr-review
-description: "Enroll a repository, configure rulesets, and install bot review or quorum roles for thelarklan/pr-review. Use when configuring automated PR review or quorum checks."
+description: "Enroll a repository in bot review, create the bot-review-quorum GitHub App, or install a review host role for thelarklanlabs/pr-review. Use when setting up automated PR review, rulesets, or quorum checks."
 ---
 
 # Pull request review setup
 
-This skill configures repositories and host roles managed by `thelarklan/pr-review`.
+This skill configures repositories and host roles that `pr-review` manages.
+For a full rebuild, follow `docs/recreate.md`.
 
 ## Quorum rule
 
-The `bot-review-quorum` check enforces full 3-of-3 exact-head approval across `{thelarklan, larkbot-codex, larkbot-claude, larkbot-gemini}`:
+The `bot-review-quorum` check requires full 3-of-3 exact-head approval across `{thelarklan, larkbot-codex, larkbot-claude, larkbot-gemini}`:
 
-- Pull requests from `thelarklan` require exact-head approvals from all three bots.
-- Pull requests from a bot require exact-head approvals from both other bots and `thelarklan`.
+- Pull requests from `thelarklan` need exact-head approvals from all three bots.
+- Pull requests from a bot need exact-head approvals from both other bots and `thelarklan`.
 
 ## Enroll a repository
 
-1. Invite all three bot accounts as collaborators with write permission.
+1. Find the App ID in the private config on `services`:
 
    ```bash
-   for bot in larkbot-codex larkbot-claude larkbot-gemini; do
-     gh api -X PUT "repos/OWNER/REPO/collaborators/$bot"
-   done
+   grep '^QUORUM_APP_ID=' ~/.config/pr-review/thelarklanlabs.env
    ```
 
-2. Accept each pending repository invitation from the matching bot WSL distribution (`codex`, `claude`, `gemini`).
-3. Confirm GitHub App installation `157289427` lists `OWNER/REPO`.
+2. Preview the changes:
 
    ```bash
-   gh api /user/installations/157289427/repositories --paginate --jq '.repositories[].full_name'
+   scripts/enroll-repo.sh OWNER/REPO --app-id APP_ID --check CI_CHECK --dry-run
    ```
 
-4. Keep `OWNER/REPO` unlisted in `~/.config/pr-review/repo-policy.json` on `services` unless auto-merge is wanted.
-   To enable squash auto-merge on a public repository, set `"auto_merge": true` in `~/.config/pr-review/repo-policy.json`.
+3. Run the same command without `--dry-run`.
+   The script sets squash merge only, gives the three bots write access, and writes the "main protection" ruleset.
+4. If a bot is not an organization member, accept its repository invitation on its WSL distribution.
+5. Keep `OWNER/REPO` out of `~/.config/pr-review/repo-policy.json` on `services` unless auto-merge is wanted.
 
-## Configure a public repository ruleset
+GitHub Free enforces rulesets only on public repositories.
+On a private repository, `bot-review-quorum` is advisory.
 
-GitHub Free restricts rulesets to public repositories.
-On private repositories under GitHub Free, treat `bot-review-quorum` as an advisory manual merge gate.
+## Create or replace the GitHub App
 
-1. Configure repository settings to permit squash merges only.
-2. Create an active default-branch ruleset with no bypass actors.
-3. Set `required_approving_review_count` to `3`.
-4. Enable `dismiss_stale_reviews_on_push`, `require_last_push_approval`, and `required_review_thread_resolution`.
-5. Keep `require_code_owner_review` set to `false` when `@thelarklan` is the sole human owner.
-   Because `@thelarklan` cannot approve self-authored pull requests, native code-owner checks would block owner pull requests.
-6. Require status check `bot-review-quorum` with `integration_id` `4752010` plus repository CI checks.
-7. Enable `strict_required_status_checks_policy` so branches stay current before merge.
+Follow section 1 of `docs/recreate.md`.
+`scripts/create-app.sh` creates the App from `github/app-manifest.json` and writes the private config.
+After you replace the App, run `scripts/enroll-repo.sh` again for each repository with the new App ID.
 
 ## Install or update a host role
 
-1. Clone `https://github.com/thelarklan/pr-review.git` to `~/projects/repos/pr-review`.
+1. Clone `https://github.com/thelarklanlabs/pr-review.git` to `~/projects/repos/pr-review`.
 2. Run `bash ~/projects/repos/pr-review/scripts/verify.sh`.
 3. Run `bash ~/projects/repos/pr-review/install.sh --role ROLE`.
    Valid roles are `codex`, `claude`, `gemini`, and `services`.
-4. On `services`, place `pr-review-quorum.env`, `repo-policy.json`, and the `.pem` key in `~/.config/pr-review/` with mode `600`.
+4. On `services`, keep each App config, `repo-policy.json`, and each `.pem` key in `~/.config/pr-review/` with mode `600`.

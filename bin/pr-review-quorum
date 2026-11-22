@@ -23,6 +23,9 @@ curl_bin="${QUORUM_CURL_BIN:-curl}"
 auto_merge_enabled="${QUORUM_AUTO_MERGE:-0}"
 log_unchanged="${QUORUM_LOG_UNCHANGED:-0}"
 repo_policy_file="${QUORUM_REPO_POLICY_FILE:-${QUORUM_PROTECTED_PATHS_FILE:-}}"
+# QUORUM_OWNER_ID is the human approver in the cohort.
+# QUORUM_REPOSITORY_OWNER_IDS lists the accounts (user or organization) whose repositories are evaluated.
+repository_owner_ids="${QUORUM_REPOSITORY_OWNER_IDS:-${QUORUM_OWNER_ID:-}}"
 
 quorum_error() {
     printf 'pr-review-quorum: %s\n' "$*" >&2
@@ -266,7 +269,11 @@ validate_configuration() {
         return 1
     }
     [[ "${QUORUM_OWNER_ID:-}" =~ ^[0-9]+$ ]] || {
-        quorum_error 'QUORUM_OWNER_ID must be the numeric repository-owner ID'
+        quorum_error 'QUORUM_OWNER_ID must be the numeric account ID of the human approver'
+        return 1
+    }
+    [[ "$repository_owner_ids" =~ ^[0-9]+(,[0-9]+)*$ ]] || {
+        quorum_error 'QUORUM_REPOSITORY_OWNER_IDS must be comma-separated numeric account IDs'
         return 1
     }
     [[ "$auto_merge_enabled" == 0 || "$auto_merge_enabled" == 1 ]] || {
@@ -354,7 +361,7 @@ main() {
             failures=$((failures + 1))
             continue
         }
-        [[ "$owner_id" == "$QUORUM_OWNER_ID" ]] || continue
+        [[ ",$repository_owner_ids," == *",$owner_id,"* ]] || continue
         default_branch=$(jq -er '.default_branch' <<<"$repository") || {
             failures=$((failures + 1))
             continue

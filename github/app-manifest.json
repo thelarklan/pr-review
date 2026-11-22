@@ -1,0 +1,13 @@
+{
+  "name": "thelarklanlabs-bot-review-quorum",
+  "url": "https://github.com/thelarklanlabs/pr-review",
+  "description": "Publishes the bot-review-quorum check from exact-head bot approvals.",
+  "redirect_url": "https://github.com/thelarklanlabs",
+  "public": false,
+  "default_permissions": {
+    "checks": "write",
+    "metadata": "read",
+    "pull_requests": "write"
+  },
+  "default_events": []
+}

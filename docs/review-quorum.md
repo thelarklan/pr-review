@@ -5,7 +5,10 @@ It never checks out pull-request code, pushes, approves, directly merges, or cha
 Its installation permissions cover metadata read, pull requests read and write, and checks read and write.
 Pull-request write exists only to enable or disable GitHub auto-merge.
 
-For each open pull request in a repository owned by `thelarklan`, the evaluator publishes `bot-review-quorum` on the exact head.
+For each open pull request in a repository whose owner is listed in `QUORUM_REPOSITORY_OWNER_IDS`, the evaluator publishes `bot-review-quorum` on the exact head.
+`QUORUM_OWNER_ID` is the human approver. The two settings are separate, so an organization can own the repositories.
+Run one evaluator pass for each App installation. `QUORUM_CONFIG_FILES` in `hosts/services.env` lists one config file for each installation.
+To create a new App and its config, see [recreate.md](recreate.md).
 The trusted cohort has four accounts: `thelarklan`, `larkbot-codex`, `larkbot-claude`, and `larkbot-gemini`.
 
 - For a pull request authored by `thelarklan`, all three bot accounts must have a latest decisive `APPROVED` review on that exact head.
@@ -32,6 +35,7 @@ Copy `pr-review-quorum.env.example` to `~/.config/pr-review/pr-review-quorum.env
 QUORUM_APP_ID=4752010
 QUORUM_INSTALLATION_ID=157289427
 QUORUM_OWNER_ID=166922787
+QUORUM_REPOSITORY_OWNER_IDS=166922787
 QUORUM_BOT_IDS=270192887,104110997,320627233
 QUORUM_PRIVATE_KEY_FILE="$HOME/.config/pr-review/thelarklan-bot-review-quorum.pem"
 QUORUM_REPO_POLICY_FILE="$HOME/.config/pr-review/repo-policy.json"
@@ -59,6 +63,7 @@ The immutable account-ID mapping is:
 | `larkbot-codex` | `270192887` |
 | `larkbot-claude` | `104110997` |
 | `larkbot-gemini` | `320627233` |
+| `thelarklanlabs` (organization) | `323226749` |
 
 Run `bin/pr-review-quorum` directly from `~/projects/repos/pr-review`; never copy it to `~/.local/bin`.
 Run one foreground audit before installing the schedule:
@@ -74,13 +79,14 @@ After verifying behavior, run `bash ~/projects/repos/pr-review/install.sh --role
 
 ## Repository ruleset
 
-For each public repository where rulesets are available, configure an active default-branch ruleset with no bypass actors that:
+Run `scripts/enroll-repo.sh OWNER/REPO --app-id APP_ID` to write this ruleset from `github/rulesets/main.json`.
+For each public repository where rulesets are available, the script configures an active default-branch ruleset with no bypass actors that:
 
 - requires pull requests and three approvals;
 - keeps `require_code_owner_review` disabled when `@thelarklan` is the sole human owner (so `@thelarklan` pull requests are not blocked);
 - dismisses stale approvals and requires approval of the latest reviewable push;
 - requires all conversations to be resolved and the branch to be current before merging;
-- requires `bot-review-quorum` from `thelarklan-bot-review-quorum` (`integration_id` `4752010`) and CI checks; and
+- requires `bot-review-quorum` from the App given by `--app-id`, and the CI checks given by `--check`; and
 - permits squash merge only.
 
 On private repositories under GitHub Free, rulesets are unavailable.

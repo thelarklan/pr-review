@@ -33,17 +33,23 @@ main() {
     fi
     _pr_watch_require_gh || return 1
 
-    local owner="${PR_WATCH_OWNER:-thelarklan}"
+    # PR_WATCH_OWNER is one account or a comma-separated list, for example "thelarklan,thelarklanlabs".
+    local owners="${PR_WATCH_OWNER:-thelarklan}"
     local configured_reviewer="${PR_WATCH_REVIEWER:-}"
     local verbose="${PR_WATCH_VERBOSE:-0}"
     local max_followups="${PR_WATCH_MAX_FOLLOWUPS:-2}"
-    local authenticated reviewer state_file lock_file lock_fd
+    local authenticated reviewer state_file lock_file lock_fd owner
     local rows row_count checked=0
+    local -a owner_args=() owner_list=()
 
-    if [[ ! "$owner" =~ ^[A-Za-z0-9-]+$ ]]; then
-        _pr_watch_error "PR_WATCH_OWNER must be a GitHub account name"
+    if [[ ! "$owners" =~ ^[A-Za-z0-9-]+(,[A-Za-z0-9-]+)*$ ]]; then
+        _pr_watch_error "PR_WATCH_OWNER must be a GitHub account name or a comma-separated list of names"
         return 2
     fi
+    IFS=',' read -r -a owner_list <<<"$owners"
+    for owner in "${owner_list[@]}"; do
+        owner_args+=(--owner "$owner")
+    done
     if [[ "$verbose" != "0" && "$verbose" != "1" ]]; then
         _pr_watch_error "PR_WATCH_VERBOSE must be 0 or 1"
         return 2
@@ -90,7 +96,7 @@ main() {
         return 1
     fi
 
-    rows=$(gh search prs --owner "$owner" --state open --limit 1000 \
+    rows=$(gh search prs "${owner_args[@]}" --state open --limit 1000 \
         --json number,repository,author,isDraft \
         --jq '.[] | [(.repository.nameWithOwner // ""), (.number | tostring), (.author.login // ""), (.isDraft | tostring)] | @tsv') || {
         _pr_watch_error "GitHub pull-request search failed"

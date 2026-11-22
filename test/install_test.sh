@@ -26,6 +26,7 @@ assert_contains "$codex_cron" 'PR_REVIEW_CODEX_EFFORT=high' "codex effort mismat
 assert_contains "$codex_cron" "$project_dir/bin/pr-review-cron" "codex runner path mismatch"
 assert_contains "$codex_cron" '19 * * * * ' "codex updater schedule missing"
 assert_contains "$codex_cron" "$project_dir/bin/pr-review-update" "codex updater path mismatch"
+assert_contains "$codex_cron" 'PR_REVIEW_OWNER=thelarklan,thelarklanlabs' "codex owner list missing"
 
 claude_cron=$("$project_dir/install.sh" --role claude --print-crontab)
 assert_contains "$claude_cron" '1-56/5 * * * * ' "claude schedule missing"
@@ -41,9 +42,25 @@ assert_contains "$gemini_cron" 'PR_REVIEW_ANTIGRAVITY_EFFORT=""' "gemini effort 
 
 services_cron=$("$project_dir/install.sh" --role services --print-crontab)
 assert_contains "$services_cron" '* * * * * ' "services schedule missing"
-assert_contains "$services_cron" 'QUORUM_CONFIG_FILE="$HOME/.config/pr-review/pr-review-quorum.env"' "services config missing"
+assert_contains "$services_cron" '/pr-review-quorum.lock" /usr/bin/env QUORUM_CONFIG_FILE="$HOME/.config/pr-review/pr-review-quorum.env"' "services user-account config missing"
+assert_contains "$services_cron" '/thelarklanlabs.lock" /usr/bin/env QUORUM_CONFIG_FILE="$HOME/.config/pr-review/thelarklanlabs.env"' "services organization config missing"
+[[ "$(grep -c 'bin/pr-review-quorum"' <<<"$services_cron")" == 2 ]] || \
+    fail "services must run one quorum pass per config"
 assert_contains "$services_cron" "$project_dir/bin/pr-review-quorum" "services quorum path mismatch"
-assert_contains "$services_cron" 'PR_REVIEW_UPDATE_LOCK="$HOME/.cache/pr-review-quorum/cron.lock"' "services lock mismatch"
+assert_contains "$services_cron" 'PR_REVIEW_UPDATE_LOCK="$HOME/.cache/pr-review-quorum/update.lock"' "services update lock mismatch"
+
+# The updater URL comes from the origin remote of the clone.
+remote_clone="$test_dir/remote-clone"
+git init -q "$remote_clone"
+cp -R "$project_dir/install.sh" "$project_dir/hosts" "$remote_clone/"
+git -C "$remote_clone" remote add origin https://github.com/example-org/pr-review.git
+remote_cron=$("$remote_clone/install.sh" --role codex --print-crontab)
+assert_contains "$remote_cron" 'PR_REVIEW_UPDATE_UPSTREAM=https://github.com/example-org/pr-review.git ' \
+    "updater URL did not follow the origin remote"
+git -C "$remote_clone" remote set-url origin 'https://github.com/x/y.git;touch /tmp/pwned'
+if "$remote_clone/install.sh" --role codex --print-crontab >/dev/null 2>&1; then
+    fail "unsafe origin URL was written into the crontab"
+fi
 
 for out in "$codex_cron" "$claude_cron" "$gemini_cron" "$services_cron"; do
     if [[ "$out" == *".local/bin/pr-review-"* ]]; then
