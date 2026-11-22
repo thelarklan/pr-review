@@ -171,7 +171,6 @@ QUORUM_BOT_IDS=$bot_ids
 QUORUM_PRIVATE_KEY_FILE="$key"
 QUORUM_REPO_POLICY_FILE="$policy_file"
 QUORUM_AUTO_MERGE=0
-QUORUM_LOG_UNCHANGED=0
 EOF
     chmod 600 "$out.next"
     mv -f -- "$out.next" "$out"

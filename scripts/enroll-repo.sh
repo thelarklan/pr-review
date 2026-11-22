@@ -109,7 +109,7 @@ if [[ -n "$existing_id" && "$replace_checks" == 0 ]]; then
     kept_json=$(jq -c '[.rules[]? | select(.type == "required_status_checks")
         | .parameters.required_status_checks[]
         | select(.context != "bot-review-quorum")
-        | {context, integration_id}]' <<<"$existing")
+        | {context} + (if .integration_id == null then {} else {integration_id} end)]' <<<"$existing")
 fi
 
 # The quorum check comes first. A --check value replaces a kept check with the same name.

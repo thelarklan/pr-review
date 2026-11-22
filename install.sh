@@ -91,6 +91,8 @@ render_cron_block() {
             printf 'install.sh: services role needs QUORUM_CONFIG_FILES\n' >&2
             return 1
         fi
+        # The updater holds every quorum lock, so it never replaces the checkout during a quorum pass.
+        update_lock=""
         for config_file in "${config_list[@]}"; do
             config_name=$(basename -- "$config_file" .env)
             if [[ ! "$config_name" =~ ^[A-Za-z0-9._-]+$ ]]; then
@@ -100,6 +102,7 @@ render_cron_block() {
             line=$(printf '%s /usr/bin/flock -n "$HOME/.cache/pr-review-quorum/%s.lock" /usr/bin/env QUORUM_CONFIG_FILE="%s" "%s/bin/pr-review-quorum" >>"$HOME/.local/state/pr-review-quorum/cron.log" 2>&1' \
                 "$PR_REVIEW_CRON_SCHEDULE" "$config_name" "$config_file" "$repo_dir")
             runner_cmd+="${runner_cmd:+$'\n'}$line"
+            update_lock+="${update_lock:+ }\$HOME/.cache/pr-review-quorum/$config_name.lock"
         done
     else
         local -a env_parts=(

@@ -8,7 +8,9 @@ source_dir="${PR_REVIEW_UPDATE_SOURCE:-$HOME/projects/repos/pr-review}"
 role="${PR_REVIEW_ROLE:-}"
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/pr-review-update"
 cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/pr-review"
-lock_file="${PR_REVIEW_UPDATE_LOCK:-$cache_dir/cron.lock}"
+# One lock file, or a space-separated list. The updater holds every lock that a scheduled job uses,
+# so it never replaces the checkout while a job runs.
+lock_files="${PR_REVIEW_UPDATE_LOCK:-$cache_dir/cron.lock}"
 log_file="${PR_REVIEW_UPDATE_LOG:-$state_dir/cron.log}"
 deployed_file="${PR_REVIEW_UPDATE_DEPLOYED_STATE:-$state_dir/deployed}"
 # The runner holds the shared lock for a full review (up to 45 minutes).
@@ -60,13 +62,19 @@ if [[ ! "$lock_wait" =~ ^(0|[1-9][0-9]*)$ ]]; then
     fail "PR_REVIEW_UPDATE_LOCK_WAIT must be a whole number of seconds"
 fi
 require_absolute_path PR_REVIEW_UPDATE_SOURCE "$source_dir"
-require_absolute_path PR_REVIEW_UPDATE_LOCK "$lock_file"
+read -r -a lock_list <<<"$lock_files"
+((${#lock_list[@]} > 0)) || fail "PR_REVIEW_UPDATE_LOCK must name at least one lock file"
+for lock_file in "${lock_list[@]}"; do
+    require_absolute_path PR_REVIEW_UPDATE_LOCK "$lock_file"
+done
 require_absolute_path PR_REVIEW_UPDATE_LOG "$log_file"
 require_absolute_path PR_REVIEW_UPDATE_DEPLOYED_STATE "$deployed_file"
 
 mkdir -p -- "$(dirname -- "$source_dir")" "$state_dir" \
-    "$(dirname -- "$lock_file")" "$(dirname -- "$log_file")" \
-    "$(dirname -- "$deployed_file")"
+    "$(dirname -- "$log_file")" "$(dirname -- "$deployed_file")"
+for lock_file in "${lock_list[@]}"; do
+    mkdir -p -- "$(dirname -- "$lock_file")"
+done
 touch -- "$log_file"
 if (( $(stat -c %s -- "$log_file") > 5242880 )); then
     tail -n 2000 -- "$log_file" >"$log_file.next"
@@ -75,17 +83,20 @@ fi
 exec >>"$log_file" 2>&1
 
 printf '\n[%s] updater started\n' "$(date --iso-8601=seconds)"
-exec {lock_fd}>"$lock_file"
 if ((lock_wait == 0)); then
     flock_args=(-n)
 else
     flock_args=(-w "$lock_wait")
 fi
-if ! flock "${flock_args[@]}" "$lock_fd"; then
-    printf '[%s] shared lock is busy after %ss; update skipped\n' \
-        "$(date --iso-8601=seconds)" "$lock_wait"
-    exit 0
-fi
+# Take the locks in list order. Each scheduled job takes only one lock, so this order cannot deadlock.
+for lock_file in "${lock_list[@]}"; do
+    exec {lock_fd}>"$lock_file"
+    if ! flock "${flock_args[@]}" "$lock_fd"; then
+        printf '[%s] shared lock %s is busy after %ss; update skipped\n' \
+            "$(date --iso-8601=seconds)" "$lock_file" "$lock_wait"
+        exit 0
+    fi
+done
 
 if [[ ! -e "$source_dir" ]]; then
     clone_dir=$(mktemp -d "${source_dir}.clone.XXXXXXXX")

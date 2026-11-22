@@ -35,6 +35,10 @@ case "$*" in
         # The live ruleset of pr-review: the old App and the verify CI job.
         printf '%s\n' '{"id":55,"name":"main protection","rules":[{"type":"deletion"},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"bot-review-quorum","integration_id":4752010},{"context":"verify","integration_id":15368}]}}]}'
         ;;
+    "api repos/thelarklanlabs/example/rulesets/56")
+        # A check that accepts results from any source has no integration_id.
+        printf '%s\n' '{"id":56,"name":"main protection","rules":[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"bot-review-quorum","integration_id":4752010},{"context":"any-source"}]}}]}'
+        ;;
 esac
 EOF
 chmod +x "$test_dir/bin/gh"
@@ -88,6 +92,15 @@ run_enroll FAKE_VISIBILITY=public FAKE_EXISTING_ID=55 "$enroll" thelarklanlabs/e
 checks=$(jq -c '[.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]]' "$test_dir/payload.json")
 [[ "$checks" == '[{"context":"bot-review-quorum","integration_id":999},{"context":"verify","integration_id":42},{"context":"lint","integration_id":15368}]' ]] ||
     fail "merged checks are wrong: $checks"
+
+# An unpinned check stays unpinned: no integration_id key, never null.
+run_enroll FAKE_VISIBILITY=public FAKE_EXISTING_ID=56 "$enroll" thelarklanlabs/example \
+    --app-id 999 >"$test_dir/out"
+grep -Fq 'api -X PUT repos/thelarklanlabs/example/rulesets/56 --input' "$test_dir/calls" ||
+    fail "ruleset 56 was not updated"
+checks=$(jq -c '[.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]]' "$test_dir/payload.json")
+[[ "$checks" == '[{"context":"bot-review-quorum","integration_id":999},{"context":"any-source"}]' ]] ||
+    fail "unpinned check was changed: $checks"
 
 # --replace-checks drops the existing CI checks.
 run_enroll FAKE_VISIBILITY=public FAKE_EXISTING_ID=55 "$enroll" thelarklanlabs/example \

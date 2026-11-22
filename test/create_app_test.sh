@@ -91,6 +91,9 @@ for expected in QUORUM_APP_ID=12345 QUORUM_INSTALLATION_ID=222 QUORUM_OWNER_ID=1
     QUORUM_REPOSITORY_OWNER_IDS=323226749 QUORUM_BOT_IDS=270192887,104110997,320627233; do
     grep -Fxq "$expected" "$env_file" || fail "config is missing $expected"
 done
+if grep -q "^QUORUM_LOG_UNCHANGED=" "$env_file"; then
+    fail "config pins QUORUM_LOG_UNCHANGED, which overrides the audit flag"
+fi
 if run_app config --org thelarklanlabs --app-id 12345 --installation-id 222 \
     --key "$real_key" >/dev/null 2>&1; then
     fail "config without repository owner IDs was accepted"
