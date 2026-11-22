@@ -45,9 +45,9 @@ A failed verification leaves the live clone and crontab unchanged.
 
 | Role | Provider | Model | Reasoning or effort option |
 | --- | --- | --- | --- |
-| `codex` | `codex` | `gpt-6.2-sol` | `PR_REVIEW_CODEX_EFFORT=high` |
-| `claude` | `claude` | `claude-opus-5-5` | `PR_REVIEW_CLAUDE_EFFORT=high` |
-| `gemini` | `agy` | `gemini-4-neon-high` | Empty (`--effort` omitted) |
+| `codex` | `codex` | `gpt-6.2-sol` | `PR_REVIEW_CODEX_EFFORT=medium` |
+| `claude` | `claude` | `claude-opus-5-5` | `PR_REVIEW_CLAUDE_EFFORT=medium` |
+| `gemini` | `agy` | `gemini-4-neon-medium` | In the model name. `--effort` is omitted. |
 
 Set `PR_REVIEW_ALERT_REPO=thelarklan/pr-review` to open or update one health issue on escalations or auth failures.
 Store optional unattended tokens (such as `CLAUDE_CODE_OAUTH_TOKEN`) in `~/.config/pr-review/provider.env` with mode `600`.

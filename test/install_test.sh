@@ -29,7 +29,7 @@ git -C "$install_dir" remote add origin https://github.com/thelarklan/pr-review.
 codex_cron=$("$install_dir/install.sh" --role codex --print-crontab)
 assert_contains "$codex_cron" '* * * * * /usr/bin/flock -n "$HOME/.cache/pr-review/cron.lock"' "codex must run each minute"
 assert_contains "$codex_cron" 'PR_REVIEW_CODEX_MODEL=gpt-6.2-sol' "codex model mismatch"
-assert_contains "$codex_cron" 'PR_REVIEW_CODEX_EFFORT=high' "codex effort mismatch"
+assert_contains "$codex_cron" 'PR_REVIEW_CODEX_EFFORT=medium' "codex effort mismatch"
 assert_contains "$codex_cron" "$install_dir/bin/pr-review-cron" "codex runner path mismatch"
 assert_contains "$codex_cron" '19 * * * * ' "codex updater schedule missing"
 assert_contains "$codex_cron" "$install_dir/bin/pr-review-update" "codex updater path mismatch"
@@ -38,13 +38,13 @@ assert_contains "$codex_cron" 'PR_REVIEW_OWNER=thelarklan,thelarklanlabs' "codex
 claude_cron=$("$install_dir/install.sh" --role claude --print-crontab)
 assert_contains "$claude_cron" '* * * * * /usr/bin/flock -n "$HOME/.cache/pr-review/cron.lock"' "claude must run each minute"
 assert_contains "$claude_cron" 'PR_REVIEW_CLAUDE_MODEL=claude-opus-5-5' "claude model mismatch"
-assert_contains "$claude_cron" 'PR_REVIEW_CLAUDE_EFFORT=high' "claude effort mismatch"
+assert_contains "$claude_cron" 'PR_REVIEW_CLAUDE_EFFORT=medium' "claude effort mismatch"
 assert_contains "$claude_cron" 'PR_REVIEW_PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"' "claude PATH missing"
 
 gemini_cron=$("$install_dir/install.sh" --role gemini --print-crontab)
 assert_contains "$gemini_cron" '* * * * * /usr/bin/flock -n "$HOME/.cache/pr-review/cron.lock"' "gemini must run each minute"
 assert_contains "$gemini_cron" 'PR_REVIEW_GEMINI_DRIVER=agy' "gemini driver mismatch"
-assert_contains "$gemini_cron" 'PR_REVIEW_ANTIGRAVITY_MODEL=gemini-4-neon-high' "gemini model mismatch"
+assert_contains "$gemini_cron" 'PR_REVIEW_ANTIGRAVITY_MODEL=gemini-4-neon-medium' "gemini model mismatch"
 assert_contains "$gemini_cron" 'PR_REVIEW_ANTIGRAVITY_EFFORT=""' "gemini effort should be empty"
 
 # services schedules only the quorum configs that exist.
