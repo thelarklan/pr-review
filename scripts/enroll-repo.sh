@@ -78,14 +78,20 @@ run() {
 visibility=$(gh api "repos/$repo" --jq '.visibility') || fail "cannot read $repo"
 printf '%s (%s)\n' "$repo" "$visibility"
 
-run api -X PATCH "repos/$repo" \
-    -F allow_squash_merge=true \
-    -F allow_merge_commit=false \
-    -F allow_rebase_merge=false \
-    -F allow_auto_merge=true \
-    -F delete_branch_on_merge=true \
-    --silent
-printf 'merge settings: squash only, auto-merge allowed, delete merged branches\n'
+# GitHub Free allows auto-merge only on public repositories, so send the field only for them.
+merge_settings=(
+    -F allow_squash_merge=true
+    -F allow_merge_commit=false
+    -F allow_rebase_merge=false
+    -F delete_branch_on_merge=true
+)
+auto_merge_summary="auto-merge unchanged (GitHub Free allows it only on public repositories)"
+if [[ "$visibility" == public ]]; then
+    merge_settings+=(-F allow_auto_merge=true)
+    auto_merge_summary="auto-merge allowed"
+fi
+run api -X PATCH "repos/$repo" "${merge_settings[@]}" --silent
+printf 'merge settings: squash only, %s, delete merged branches\n' "$auto_merge_summary"
 
 for bot in "${bots[@]}"; do
     run api -X PUT "repos/$repo/collaborators/$bot" -f permission=push --silent
@@ -101,24 +107,45 @@ fi
 existing_id=$(gh api "repos/$repo/rulesets" \
     --jq '.[] | select(.source_type == "Repository" and .name == "main protection") | .id' | head -n 1)
 
-# Keep the CI checks of an existing ruleset, so a new App ID cannot drop them.
-# --replace-checks uses only the --check values.
+# An update keeps what the template does not define:
+# - rules of other types (for example required_signatures) stay as they are;
+# - parameters that the template does not set stay as they are;
+# - CI checks stay, unless --replace-checks is given.
+# The template wins for the settings it defines (approvals, no bypass, squash only).
+existing='null'
 kept_json='[]'
-if [[ -n "$existing_id" && "$replace_checks" == 0 ]]; then
+if [[ -n "$existing_id" ]]; then
     existing=$(gh api "repos/$repo/rulesets/$existing_id") || fail "cannot read ruleset $existing_id"
-    kept_json=$(jq -c '[.rules[]? | select(.type == "required_status_checks")
-        | .parameters.required_status_checks[]
-        | select(.context != "bot-review-quorum")
-        | {context} + (if .integration_id == null then {} else {integration_id} end)]' <<<"$existing")
+    if [[ "$replace_checks" == 0 ]]; then
+        kept_json=$(jq -c '[.rules[]? | select(.type == "required_status_checks")
+            | .parameters.required_status_checks[]
+            | select(.context != "bot-review-quorum")
+            | {context} + (if .integration_id == null then {} else {integration_id} end)]' <<<"$existing")
+    fi
 fi
 
 # The quorum check comes first. A --check value replaces a kept check with the same name.
-ruleset=$(jq -c --argjson app_id "$app_id" --argjson kept "$kept_json" --argjson extra "$checks_json" '
+ruleset=$(jq -c --argjson app_id "$app_id" --argjson kept "$kept_json" --argjson extra "$checks_json" \
+    --argjson existing "$existing" '
     ($kept + $extra
         | reduce .[] as $check ([];
             if any(.[]; .context == $check.context)
             then map(if .context == $check.context then $check else . end)
             else . + [$check] end)) as $ci
+    | . as $template
+    | (if $existing == null then $template.rules
+       else
+           ($existing.rules | map(
+               . as $live
+               | ([$template.rules[] | select(.type == $live.type)] | first) as $wanted
+               | if $wanted == null then $live
+                 else {type: $live.type}
+                      + (if ($live.parameters // $wanted.parameters) == null then {}
+                         else {parameters: (($live.parameters // {}) + ($wanted.parameters // {}))} end)
+                 end))
+           + [$template.rules[] | select(.type as $type | all($existing.rules[]; .type != $type))]
+       end) as $rules
+    | $template + {rules: $rules}
     | .rules |= map(
         if .type == "required_status_checks" then
             .parameters.required_status_checks =

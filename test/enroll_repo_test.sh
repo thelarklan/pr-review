@@ -22,6 +22,11 @@ for argument in "$@"; do
     fi
     previous="$argument"
 done
+# GitHub Free may reject auto-merge on a private repository (HTTP 422).
+if [[ "$FAKE_VISIBILITY" == private && "$*" == *"-X PATCH"* && "$*" == *allow_auto_merge* ]]; then
+    printf 'HTTP 422: auto-merge is not available for this repository\n' >&2
+    exit 1
+fi
 case "$*" in
     "api repos/thelarklanlabs/example --jq .visibility")
         printf '%s\n' "$FAKE_VISIBILITY"
@@ -34,6 +39,10 @@ case "$*" in
     "api repos/thelarklanlabs/example/rulesets/55")
         # The live ruleset of pr-review: the old App and the verify CI job.
         printf '%s\n' '{"id":55,"name":"main protection","rules":[{"type":"deletion"},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"bot-review-quorum","integration_id":4752010},{"context":"verify","integration_id":15368}]}}]}'
+        ;;
+    "api repos/thelarklanlabs/example/rulesets/57")
+        # A live ruleset with protections that the template does not define.
+        printf '%s\n' '{"id":57,"name":"main protection","rules":[{"type":"deletion"},{"type":"required_signatures"},{"type":"pull_request","parameters":{"required_approving_review_count":2,"require_extra_approval_for_unattributed_changes":true,"allowed_merge_methods":["squash","merge"]}},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"bot-review-quorum","integration_id":4752010},{"context":"verify","integration_id":15368}]}}]}'
         ;;
     "api repos/thelarklanlabs/example/rulesets/56")
         # A check that accepts results from any source has no integration_id.
@@ -108,12 +117,49 @@ run_enroll FAKE_VISIBILITY=public FAKE_EXISTING_ID=55 "$enroll" thelarklanlabs/e
 checks=$(jq -c '[.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context]' "$test_dir/payload.json")
 [[ "$checks" == '["bot-review-quorum"]' ]] || fail "--replace-checks kept old checks: $checks"
 
-# Private repository on GitHub Free: no ruleset.
-run_enroll FAKE_VISIBILITY=private "$enroll" thelarklanlabs/example --app-id 999 >"$test_dir/out"
+# An App change keeps protections that the template does not define.
+run_enroll FAKE_VISIBILITY=public FAKE_EXISTING_ID=57 "$enroll" thelarklanlabs/example \
+    --app-id 999 >"$test_dir/out"
+grep -Fq 'api -X PUT repos/thelarklanlabs/example/rulesets/57 --input' "$test_dir/calls" ||
+    fail "ruleset 57 was not updated"
+rule_types=$(jq -c '[.rules[].type]' "$test_dir/payload.json")
+[[ "$rule_types" == '["deletion","required_signatures","pull_request","required_status_checks","non_fast_forward"]' ]] ||
+    fail "rules were dropped or reordered: $rule_types"
+pull_request=$(jq -c '.rules[] | select(.type == "pull_request") | .parameters' "$test_dir/payload.json")
+[[ "$(jq '.require_extra_approval_for_unattributed_changes' <<<"$pull_request")" == true ]] ||
+    fail "extra pull_request parameter was dropped: $pull_request"
+[[ "$(jq '.required_approving_review_count' <<<"$pull_request")" == 3 ]] ||
+    fail "template approval count did not win: $pull_request"
+[[ "$(jq -c '.allowed_merge_methods' <<<"$pull_request")" == '["squash"]' ]] ||
+    fail "template merge methods did not win: $pull_request"
+checks=$(jq -c '[.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context]' "$test_dir/payload.json")
+[[ "$checks" == '["bot-review-quorum","verify"]' ]] || fail "checks are wrong after App change: $checks"
+[[ "$(jq '.bypass_actors | length' "$test_dir/payload.json")" == 0 ]] ||
+    fail "ruleset must have no bypass actors"
+
+# Private repository on GitHub Free: no auto-merge field, bots still get access, no ruleset.
+run_enroll FAKE_VISIBILITY=private "$enroll" thelarklanlabs/example --app-id 999 >"$test_dir/out" ||
+    fail "private enrollment failed"
+grep -Fq 'api -X PATCH repos/thelarklanlabs/example -F allow_squash_merge=true' "$test_dir/calls" ||
+    fail "private repository did not get merge settings"
+if grep -Fq 'allow_auto_merge' "$test_dir/calls"; then
+    fail "private repository got the auto-merge setting"
+fi
+for bot in larkbot-codex larkbot-claude larkbot-gemini; do
+    grep -Fq "api -X PUT repos/thelarklanlabs/example/collaborators/$bot -f permission=push" "$test_dir/calls" ||
+        fail "private repository did not give $bot write access"
+done
 if grep -Fq '/rulesets' "$test_dir/calls"; then
     fail "private repository got a ruleset call"
 fi
 grep -Fq 'advisory' "$test_dir/out" || fail "private repository result was not explained"
+if grep -Fq 'auto-merge allowed' "$test_dir/out"; then
+    fail "private repository summary claims auto-merge"
+fi
+
+# Public repository: auto-merge is allowed.
+run_enroll FAKE_VISIBILITY=public "$enroll" thelarklanlabs/example --app-id 999 >"$test_dir/out"
+grep -Fq -- '-F allow_auto_merge=true' "$test_dir/calls" || fail "public repository did not allow auto-merge"
 
 # Dry run: read only.
 run_enroll FAKE_VISIBILITY=public "$enroll" thelarklanlabs/example --app-id 999 --dry-run >"$test_dir/out"
