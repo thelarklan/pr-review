@@ -8,7 +8,7 @@ source_dir="${PR_REVIEW_UPDATE_SOURCE:-$HOME/projects/repos/pr-review}"
 role="${PR_REVIEW_ROLE:-}"
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/pr-review-update"
 cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/pr-review"
-# One lock file, or a space-separated list. The updater holds every lock that a scheduled job uses,
+# One lock file, or a list separated by ":" (a path may contain spaces). The updater holds every lock that a scheduled job uses,
 # so it never replaces the checkout while a job runs.
 lock_files="${PR_REVIEW_UPDATE_LOCK:-$cache_dir/cron.lock}"
 log_file="${PR_REVIEW_UPDATE_LOG:-$state_dir/cron.log}"
@@ -62,7 +62,7 @@ if [[ ! "$lock_wait" =~ ^(0|[1-9][0-9]*)$ ]]; then
     fail "PR_REVIEW_UPDATE_LOCK_WAIT must be a whole number of seconds"
 fi
 require_absolute_path PR_REVIEW_UPDATE_SOURCE "$source_dir"
-read -r -a lock_list <<<"$lock_files"
+IFS=':' read -r -a lock_list <<<"$lock_files"
 ((${#lock_list[@]} > 0)) || fail "PR_REVIEW_UPDATE_LOCK must name at least one lock file"
 for lock_file in "${lock_list[@]}"; do
     require_absolute_path PR_REVIEW_UPDATE_LOCK "$lock_file"

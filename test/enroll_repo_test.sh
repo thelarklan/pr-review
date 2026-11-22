@@ -52,15 +52,23 @@ case "$*" in
         ;;
     "api repos/thelarklanlabs/example/rulesets/55")
         # The live ruleset of pr-review: the old App and the verify CI job.
-        printf '%s\n' '{"id":55,"name":"main protection","rules":[{"type":"deletion"},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"bot-review-quorum","integration_id":4752010},{"context":"verify","integration_id":15368}]}}]}'
+        printf '%s\n' '{"id":55,"name":"main protection","conditions":{"ref_name":{"include":["~DEFAULT_BRANCH"],"exclude":[]}},"rules":[{"type":"deletion"},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"bot-review-quorum","integration_id":4752010},{"context":"verify","integration_id":15368}]}}]}'
         ;;
     "api repos/thelarklanlabs/example/rulesets/57")
         # A live ruleset with protections that the template does not define.
-        printf '%s\n' '{"id":57,"name":"main protection","rules":[{"type":"deletion"},{"type":"required_signatures"},{"type":"pull_request","parameters":{"required_approving_review_count":2,"require_extra_approval_for_unattributed_changes":true,"allowed_merge_methods":["squash","merge"]}},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"bot-review-quorum","integration_id":4752010},{"context":"verify","integration_id":15368}]}}]}'
+        printf '%s\n' '{"id":57,"name":"main protection","conditions":{"ref_name":{"include":["~DEFAULT_BRANCH"],"exclude":[]}},"rules":[{"type":"deletion"},{"type":"required_signatures"},{"type":"pull_request","parameters":{"required_approving_review_count":2,"require_extra_approval_for_unattributed_changes":true,"allowed_merge_methods":["squash","merge"]}},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"bot-review-quorum","integration_id":4752010},{"context":"verify","integration_id":15368}]}}]}'
+        ;;
+    "api repos/thelarklanlabs/example/rulesets/58")
+        # A ruleset that also covers release branches.
+        printf '%s\n' '{"id":58,"name":"main protection","conditions":{"ref_name":{"include":["~DEFAULT_BRANCH","refs/heads/release/*"],"exclude":[]}},"rules":[{"type":"required_signatures"}]}'
+        ;;
+    "api repos/thelarklanlabs/example/rulesets/59")
+        printf 'HTTP 503: Service Unavailable\n' >&2
+        exit 1
         ;;
     "api repos/thelarklanlabs/example/rulesets/56")
         # A check that accepts results from any source has no integration_id.
-        printf '%s\n' '{"id":56,"name":"main protection","rules":[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"bot-review-quorum","integration_id":4752010},{"context":"any-source"}]}}]}'
+        printf '%s\n' '{"id":56,"name":"main protection","conditions":{"ref_name":{"include":["~DEFAULT_BRANCH"],"exclude":[]}},"rules":[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"bot-review-quorum","integration_id":4752010},{"context":"any-source"}]}}]}'
         ;;
 esac
 EOF
@@ -227,6 +235,13 @@ run_enroll FAKE_VISIBILITY=public FAKE_OWNER_TYPE=User "$enroll" thelarklanlabs/
 if grep -Fq 'api users/' "$test_dir/calls"; then
     fail "--skip-install-check still checked the installation"
 fi
+
+# The script does not change branch coverage, and it reads everything before any write.
+assert_refused_without_writes "ruleset with release branches was narrowed" \
+    FAKE_EXISTING_ID=58 "$enroll" thelarklanlabs/example --app-id 999
+grep -Fq 'does not change branch coverage' "$test_dir/err" || fail "branch coverage refusal was not explained"
+assert_refused_without_writes "failed ruleset read still changed settings" \
+    FAKE_EXISTING_ID=59 "$enroll" thelarklanlabs/example --app-id 999
 
 # Invalid input.
 if run_enroll FAKE_VISIBILITY=public "$enroll" thelarklanlabs/example --app-id abc >/dev/null 2>&1; then

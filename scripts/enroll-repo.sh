@@ -117,44 +117,31 @@ if ((skip_install_check == 0)); then
     printf 'App %s: installed on %s for all repositories\n' "$app_id" "$owner"
 fi
 
-# GitHub Free allows auto-merge only on public repositories, so send the field only for them.
-merge_settings=(
-    -F allow_squash_merge=true
-    -F allow_merge_commit=false
-    -F allow_rebase_merge=false
-    -F delete_branch_on_merge=true
-)
-auto_merge_summary="auto-merge unchanged (GitHub Free allows it only on public repositories)"
+# Do every read first. The script changes nothing until all reads and checks pass.
+existing_id=""
+existing='null'
+kept_json='[]'
+ruleset_file=""
 if [[ "$visibility" == public ]]; then
-    merge_settings+=(-F allow_auto_merge=true)
-    auto_merge_summary="auto-merge allowed"
+    existing_id=$(gh api "repos/$repo/rulesets" \
+        --jq '.[] | select(.source_type == "Repository" and .name == "main protection") | .id' | head -n 1) ||
+        fail "cannot list the rulesets of $repo"
 fi
-run api -X PATCH "repos/$repo" "${merge_settings[@]}" --silent
-printf 'merge settings: squash only, %s, delete merged branches\n' "$auto_merge_summary"
-
-for bot in "${bots[@]}"; do
-    run api -X PUT "repos/$repo/collaborators/$bot" -f permission=push --silent
-done
-printf 'bot access: %s (write)\n' "${bots[*]}"
-
-if [[ "$visibility" != public ]]; then
-    printf 'ruleset: skipped. GitHub Free enforces rulesets only on public repositories.\n'
-    printf 'bot-review-quorum is advisory on %s.\n' "$repo"
-    exit 0
-fi
-
-existing_id=$(gh api "repos/$repo/rulesets" \
-    --jq '.[] | select(.source_type == "Repository" and .name == "main protection") | .id' | head -n 1)
 
 # An update keeps what the template does not define:
 # - rules of other types (for example required_signatures) stay as they are;
 # - parameters that the template does not set stay as they are;
 # - CI checks stay, unless --replace-checks is given.
 # The template wins for the settings it defines (approvals, no bypass, squash only).
-existing='null'
-kept_json='[]'
+# The script does not change which branches a ruleset covers. It stops if they differ from the template.
 if [[ -n "$existing_id" ]]; then
     existing=$(gh api "repos/$repo/rulesets/$existing_id") || fail "cannot read ruleset $existing_id"
+    same_scope=$(jq -n --argjson existing "$existing" --slurpfile template "$template" '
+        def scope: {include: ((.ref_name.include // []) | sort), exclude: ((.ref_name.exclude // []) | sort)};
+        ($existing.conditions // {} | scope) == ($template[0].conditions | scope)')
+    if [[ "$same_scope" != true ]]; then
+        fail "ruleset \"main protection\" ($existing_id) covers branches $(jq -c '.conditions.ref_name' <<<"$existing"), not only the default branch. The script does not change branch coverage. Update that ruleset by hand."
+    fi
     if [[ "$replace_checks" == 0 ]]; then
         kept_json=$(jq -c '[.rules[]? | select(.type == "required_status_checks")
             | .parameters.required_status_checks[]
@@ -192,11 +179,40 @@ ruleset=$(jq -c --argjson app_id "$app_id" --argjson kept "$kept_json" --argjson
         else . end)
 ' "$template")
 
-ruleset_file=$(mktemp)
-trap 'rm -f -- "$ruleset_file"' EXIT
-printf '%s\n' "$ruleset" >"$ruleset_file"
-if ((dry_run == 1)); then
-    jq . "$ruleset_file"
+if [[ "$visibility" == public ]]; then
+    ruleset_file=$(mktemp)
+    trap 'rm -f -- "$ruleset_file"' EXIT
+    printf '%s\n' "$ruleset" >"$ruleset_file"
+    if ((dry_run == 1)); then
+        jq . "$ruleset_file"
+    fi
+fi
+
+# Writes start here.
+# GitHub Free allows auto-merge only on public repositories, so send the field only for them.
+merge_settings=(
+    -F allow_squash_merge=true
+    -F allow_merge_commit=false
+    -F allow_rebase_merge=false
+    -F delete_branch_on_merge=true
+)
+auto_merge_summary="auto-merge unchanged (GitHub Free allows it only on public repositories)"
+if [[ "$visibility" == public ]]; then
+    merge_settings+=(-F allow_auto_merge=true)
+    auto_merge_summary="auto-merge allowed"
+fi
+run api -X PATCH "repos/$repo" "${merge_settings[@]}" --silent
+printf 'merge settings: squash only, %s, delete merged branches\n' "$auto_merge_summary"
+
+for bot in "${bots[@]}"; do
+    run api -X PUT "repos/$repo/collaborators/$bot" -f permission=push --silent
+done
+printf 'bot access: %s (write)\n' "${bots[*]}"
+
+if [[ "$visibility" != public ]]; then
+    printf 'ruleset: skipped. GitHub Free enforces rulesets only on public repositories.\n'
+    printf 'bot-review-quorum is advisory on %s.\n' "$repo"
+    exit 0
 fi
 
 if [[ -n "$existing_id" ]]; then

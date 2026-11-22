@@ -82,7 +82,7 @@ The private key goes only to `services`.
     ```bash
     scripts/create-app.sh config --org thelarklanlabs --app-id APP_ID \
       --installation-id INSTALLATION_ID --key ~/.config/pr-review/<slug>.pem \
-      --repository-owner-ids "$(gh api orgs/thelarklanlabs --jq .id)"
+      --repository-owner-ids "$(curl -fsS https://api.github.com/orgs/thelarklanlabs | jq .id)"
     ```
 
 12. Make sure that `QUORUM_CONFIG_FILES` in `hosts/services.env` names this file.

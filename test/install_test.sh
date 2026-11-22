@@ -72,7 +72,7 @@ assert_contains "$services_cron" '/thelarklanlabs.lock" /usr/bin/env QUORUM_CONF
 [[ "$(grep -c 'bin/pr-review-quorum"' <<<"$services_cron")" == 2 ]] || \
     fail "services must run one quorum pass per config"
 assert_contains "$services_cron" "$install_dir/bin/pr-review-quorum" "services quorum path mismatch"
-assert_contains "$services_cron" 'PR_REVIEW_UPDATE_LOCK="$HOME/.cache/pr-review-quorum/pr-review-quorum.lock $HOME/.cache/pr-review-quorum/thelarklanlabs.lock"' "services updater must hold both evaluator locks"
+assert_contains "$services_cron" 'PR_REVIEW_UPDATE_LOCK="$HOME/.cache/pr-review-quorum/pr-review-quorum.lock:$HOME/.cache/pr-review-quorum/thelarklanlabs.lock"' "services updater must hold both evaluator locks"
 
 # The updater URL comes from the origin remote of the clone.
 remote_clone="$test_dir/remote-clone"

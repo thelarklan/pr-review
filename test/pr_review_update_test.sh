@@ -92,9 +92,9 @@ exec 9>&-
 
 # services runs one quorum job per App, each with its own lock. The updater must hold all of them.
 # Hold only the second lock: the updater must still skip.
-second_lock="$cache_dir/pr-review-quorum/second.lock"
+second_lock="$cache_dir/pr review quorum/second.lock"
 mkdir -p "$(dirname "$second_lock")"
-update_locks="$lock_file $second_lock"
+update_locks="$lock_file:$second_lock"
 exec 8>"$second_lock"
 flock -n 8 || fail "test could not acquire the second lock"
 lock_wait_seconds=0
@@ -106,6 +106,11 @@ exec 8>&-
 [[ "$(grep -Fc "$second_lock is busy" "$state_dir/pr-review-update/cron.log")" == $((skipped_before + 1)) ]] ||
     fail "updater ignored a busy evaluator lock"
 [[ "$(grep -Fc verify "$trace_file")" == 1 ]] || fail "updater ran while an evaluator lock was held"
+# With both locks free, a lock path with a space works.
+already_before=$(grep -Fc "already at verified commit" "$state_dir/pr-review-update/cron.log")
+run_update
+[[ "$(grep -Fc "already at verified commit" "$state_dir/pr-review-update/cron.log")" == $((already_before + 1)) ]] ||
+    fail "updater failed with a lock path that contains a space"
 update_locks="$lock_file"
 
 # A review that holds the lock for a short time must delay the update, not skip it.
