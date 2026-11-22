@@ -31,6 +31,10 @@ case "$*" in
             printf '%s\n' "$FAKE_EXISTING_ID"
         fi
         ;;
+    "api repos/thelarklanlabs/example/rulesets/55")
+        # The live ruleset of pr-review: the old App and the verify CI job.
+        printf '%s\n' '{"id":55,"name":"main protection","rules":[{"type":"deletion"},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"bot-review-quorum","integration_id":4752010},{"context":"verify","integration_id":15368}]}}]}'
+        ;;
 esac
 EOF
 chmod +x "$test_dir/bin/gh"
@@ -73,6 +77,23 @@ grep -Fq 'api -X PUT repos/thelarklanlabs/example/rulesets/55 --input' "$test_di
 if grep -Fq 'api -X POST repos/thelarklanlabs/example/rulesets' "$test_dir/calls"; then
     fail "a second ruleset was created"
 fi
+# A new App ID alone must keep the existing CI check.
+checks=$(jq -c '[.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]]' "$test_dir/payload.json")
+[[ "$checks" == '[{"context":"bot-review-quorum","integration_id":999},{"context":"verify","integration_id":15368}]' ]] ||
+    fail "App change dropped or kept the wrong checks: $checks"
+
+# A --check value with the same name replaces the kept check, and new checks are added once.
+run_enroll FAKE_VISIBILITY=public FAKE_EXISTING_ID=55 "$enroll" thelarklanlabs/example \
+    --app-id 999 --check verify:42 --check lint --check lint >"$test_dir/out"
+checks=$(jq -c '[.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]]' "$test_dir/payload.json")
+[[ "$checks" == '[{"context":"bot-review-quorum","integration_id":999},{"context":"verify","integration_id":42},{"context":"lint","integration_id":15368}]' ]] ||
+    fail "merged checks are wrong: $checks"
+
+# --replace-checks drops the existing CI checks.
+run_enroll FAKE_VISIBILITY=public FAKE_EXISTING_ID=55 "$enroll" thelarklanlabs/example \
+    --app-id 999 --replace-checks >"$test_dir/out"
+checks=$(jq -c '[.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context]' "$test_dir/payload.json")
+[[ "$checks" == '["bot-review-quorum"]' ]] || fail "--replace-checks kept old checks: $checks"
 
 # Private repository on GitHub Free: no ruleset.
 run_enroll FAKE_VISIBILITY=private "$enroll" thelarklanlabs/example --app-id 999 >"$test_dir/out"

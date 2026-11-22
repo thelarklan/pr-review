@@ -2,10 +2,11 @@
 # Enroll a repository in bot review: merge settings, bot access, and the "main protection" ruleset.
 # The command is idempotent. Run it again after a transfer or when the App changes.
 #
-# usage: enroll-repo.sh OWNER/REPO --app-id ID [--check NAME[:INTEGRATION_ID]]... [--dry-run]
-#   --app-id   ID of the bot-review-quorum GitHub App. The ruleset requires its check.
-#   --check    Another required check. The default integration is GitHub Actions (15368).
-#   --dry-run  Print the ruleset and the planned API calls. Change nothing.
+# usage: enroll-repo.sh OWNER/REPO --app-id ID [--check NAME[:INTEGRATION_ID]]... [--replace-checks] [--dry-run]
+#   --app-id          ID of the bot-review-quorum GitHub App. The ruleset requires its check.
+#   --check           Another required check. The default integration is GitHub Actions (15368).
+#   --replace-checks  Drop the CI checks of the existing ruleset. By default the script keeps them.
+#   --dry-run         Print the ruleset and the planned API calls. Change nothing.
 set -euo pipefail
 
 repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -14,7 +15,7 @@ bots=(larkbot-codex larkbot-claude larkbot-gemini)
 actions_integration_id=15368
 
 usage() {
-    sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+    sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
 }
 
 fail() {
@@ -28,6 +29,7 @@ shift
 
 app_id=""
 dry_run=0
+replace_checks=0
 checks_json='[]'
 while (($# > 0)); do
     case "$1" in
@@ -52,6 +54,10 @@ while (($# > 0)); do
             dry_run=1
             shift
             ;;
+        --replace-checks)
+            replace_checks=1
+            shift
+            ;;
         *)
             usage
             exit 2
@@ -60,15 +66,6 @@ while (($# > 0)); do
 done
 [[ "$app_id" =~ ^[0-9]+$ ]] || fail "--app-id must be the numeric App ID"
 [[ -f "$template" ]] || fail "ruleset template not found: $template"
-
-# The quorum check comes first, then the extra checks.
-ruleset=$(jq -c --argjson app_id "$app_id" --argjson extra "$checks_json" '
-    .rules |= map(
-        if .type == "required_status_checks" then
-            .parameters.required_status_checks =
-                ([{context: "bot-review-quorum", integration_id: $app_id}] + $extra)
-        else . end)
-' "$template")
 
 run() {
     if ((dry_run == 1)); then
@@ -101,6 +98,34 @@ if [[ "$visibility" != public ]]; then
     exit 0
 fi
 
+existing_id=$(gh api "repos/$repo/rulesets" \
+    --jq '.[] | select(.source_type == "Repository" and .name == "main protection") | .id' | head -n 1)
+
+# Keep the CI checks of an existing ruleset, so a new App ID cannot drop them.
+# --replace-checks uses only the --check values.
+kept_json='[]'
+if [[ -n "$existing_id" && "$replace_checks" == 0 ]]; then
+    existing=$(gh api "repos/$repo/rulesets/$existing_id") || fail "cannot read ruleset $existing_id"
+    kept_json=$(jq -c '[.rules[]? | select(.type == "required_status_checks")
+        | .parameters.required_status_checks[]
+        | select(.context != "bot-review-quorum")
+        | {context, integration_id}]' <<<"$existing")
+fi
+
+# The quorum check comes first. A --check value replaces a kept check with the same name.
+ruleset=$(jq -c --argjson app_id "$app_id" --argjson kept "$kept_json" --argjson extra "$checks_json" '
+    ($kept + $extra
+        | reduce .[] as $check ([];
+            if any(.[]; .context == $check.context)
+            then map(if .context == $check.context then $check else . end)
+            else . + [$check] end)) as $ci
+    | .rules |= map(
+        if .type == "required_status_checks" then
+            .parameters.required_status_checks =
+                ([{context: "bot-review-quorum", integration_id: $app_id}] + $ci)
+        else . end)
+' "$template")
+
 ruleset_file=$(mktemp)
 trap 'rm -f -- "$ruleset_file"' EXIT
 printf '%s\n' "$ruleset" >"$ruleset_file"
@@ -108,8 +133,6 @@ if ((dry_run == 1)); then
     jq . "$ruleset_file"
 fi
 
-existing_id=$(gh api "repos/$repo/rulesets" \
-    --jq '.[] | select(.source_type == "Repository" and .name == "main protection") | .id' | head -n 1)
 if [[ -n "$existing_id" ]]; then
     run api -X PUT "repos/$repo/rulesets/$existing_id" --input "$ruleset_file" --silent
     printf 'ruleset: updated "main protection" (%s)\n' "$existing_id"

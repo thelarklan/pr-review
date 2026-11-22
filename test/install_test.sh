@@ -19,34 +19,41 @@ assert_contains() {
     fi
 }
 
-codex_cron=$("$project_dir/install.sh" --role codex --print-crontab)
+# Run install.sh from a fixture clone with a fixed https origin.
+# The result then does not depend on how the developer cloned this repository.
+install_dir="$test_dir/install-fixture"
+git init -q "$install_dir"
+cp -R "$project_dir/install.sh" "$project_dir/hosts" "$install_dir/"
+git -C "$install_dir" remote add origin https://github.com/thelarklan/pr-review.git
+
+codex_cron=$("$install_dir/install.sh" --role codex --print-crontab)
 assert_contains "$codex_cron" '*/5 * * * * ' "codex schedule missing"
 assert_contains "$codex_cron" 'PR_REVIEW_CODEX_MODEL=gpt-6.2-sol' "codex model mismatch"
 assert_contains "$codex_cron" 'PR_REVIEW_CODEX_EFFORT=high' "codex effort mismatch"
-assert_contains "$codex_cron" "$project_dir/bin/pr-review-cron" "codex runner path mismatch"
+assert_contains "$codex_cron" "$install_dir/bin/pr-review-cron" "codex runner path mismatch"
 assert_contains "$codex_cron" '19 * * * * ' "codex updater schedule missing"
-assert_contains "$codex_cron" "$project_dir/bin/pr-review-update" "codex updater path mismatch"
+assert_contains "$codex_cron" "$install_dir/bin/pr-review-update" "codex updater path mismatch"
 assert_contains "$codex_cron" 'PR_REVIEW_OWNER=thelarklan,thelarklanlabs' "codex owner list missing"
 
-claude_cron=$("$project_dir/install.sh" --role claude --print-crontab)
+claude_cron=$("$install_dir/install.sh" --role claude --print-crontab)
 assert_contains "$claude_cron" '1-56/5 * * * * ' "claude schedule missing"
 assert_contains "$claude_cron" 'PR_REVIEW_CLAUDE_MODEL=claude-opus-5-5' "claude model mismatch"
 assert_contains "$claude_cron" 'PR_REVIEW_CLAUDE_EFFORT=high' "claude effort mismatch"
 assert_contains "$claude_cron" 'PR_REVIEW_PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"' "claude PATH missing"
 
-gemini_cron=$("$project_dir/install.sh" --role gemini --print-crontab)
+gemini_cron=$("$install_dir/install.sh" --role gemini --print-crontab)
 assert_contains "$gemini_cron" '2-57/5 * * * * ' "gemini schedule missing"
 assert_contains "$gemini_cron" 'PR_REVIEW_GEMINI_DRIVER=agy' "gemini driver mismatch"
 assert_contains "$gemini_cron" 'PR_REVIEW_ANTIGRAVITY_MODEL=gemini-4-neon-high' "gemini model mismatch"
 assert_contains "$gemini_cron" 'PR_REVIEW_ANTIGRAVITY_EFFORT=""' "gemini effort should be empty"
 
-services_cron=$("$project_dir/install.sh" --role services --print-crontab)
+services_cron=$("$install_dir/install.sh" --role services --print-crontab)
 assert_contains "$services_cron" '* * * * * ' "services schedule missing"
 assert_contains "$services_cron" '/pr-review-quorum.lock" /usr/bin/env QUORUM_CONFIG_FILE="$HOME/.config/pr-review/pr-review-quorum.env"' "services user-account config missing"
 assert_contains "$services_cron" '/thelarklanlabs.lock" /usr/bin/env QUORUM_CONFIG_FILE="$HOME/.config/pr-review/thelarklanlabs.env"' "services organization config missing"
 [[ "$(grep -c 'bin/pr-review-quorum"' <<<"$services_cron")" == 2 ]] || \
     fail "services must run one quorum pass per config"
-assert_contains "$services_cron" "$project_dir/bin/pr-review-quorum" "services quorum path mismatch"
+assert_contains "$services_cron" "$install_dir/bin/pr-review-quorum" "services quorum path mismatch"
 assert_contains "$services_cron" 'PR_REVIEW_UPDATE_LOCK="$HOME/.cache/pr-review-quorum/update.lock"' "services update lock mismatch"
 
 # The updater URL comes from the origin remote of the clone.
@@ -62,6 +69,15 @@ if "$remote_clone/install.sh" --role codex --print-crontab >/dev/null 2>&1; then
     fail "unsafe origin URL was written into the crontab"
 fi
 
+# Hosts pull without credentials, so an SSH origin is refused with a clear message.
+# A developer clone with an SSH origin still passes verify.sh, because the checks above use the fixture.
+git -C "$remote_clone" remote set-url origin git@github.com:thelarklan/pr-review.git
+if "$remote_clone/install.sh" --role codex --print-crontab >/dev/null 2>"$test_dir/ssh.err"; then
+    fail "SSH origin was written into the crontab"
+fi
+grep -Fq 'origin remote must be an https URL' "$test_dir/ssh.err" ||
+    fail "SSH origin refusal was not explained"
+
 for out in "$codex_cron" "$claude_cron" "$gemini_cron" "$services_cron"; do
     if [[ "$out" == *".local/bin/pr-review-"* ]]; then
         fail "rendered crontab still references ~/.local/bin/pr-review-*"
@@ -70,7 +86,7 @@ done
 
 fake_home="$test_dir/home"
 mkdir -p "$fake_home"
-HOME="$fake_home" "$project_dir/install.sh" --role services --no-crontab >/dev/null
+HOME="$fake_home" "$install_dir/install.sh" --role services --no-crontab >/dev/null
 [[ -d "$fake_home/.cache/pr-review-quorum" ]] || fail "services cache directory missing"
 [[ -d "$fake_home/.local/state/pr-review-quorum" ]] || fail "services state directory missing"
 [[ -d "$fake_home/.local/state/pr-review-update" ]] || fail "updater state directory missing"
@@ -96,14 +112,14 @@ EOF
 chmod +x "$fake_bin/crontab"
 
 printf '0 3 * * * /usr/local/bin/unrelated-job\n' >"$test_dir/crontab.store"
-PATH="$fake_bin:$PATH" HOME="$fake_home" "$project_dir/install.sh" --role codex >/dev/null
-PATH="$fake_bin:$PATH" HOME="$fake_home" "$project_dir/install.sh" --role codex >/dev/null
+PATH="$fake_bin:$PATH" HOME="$fake_home" "$install_dir/install.sh" --role codex >/dev/null
+PATH="$fake_bin:$PATH" HOME="$fake_home" "$install_dir/install.sh" --role codex >/dev/null
 installed_store=$(<"$test_dir/crontab.store")
 assert_contains "$installed_store" '/usr/local/bin/unrelated-job' "unrelated cron job was lost"
 [[ "$(grep -Fc '# BEGIN pr-review' <<<"$installed_store")" == 1 ]] || \
     fail "install.sh duplicated managed crontab block"
 
-if "$project_dir/install.sh" --role unknown >/dev/null 2>&1; then
+if "$install_dir/install.sh" --role unknown >/dev/null 2>&1; then
     fail "invalid role succeeded"
 fi
 

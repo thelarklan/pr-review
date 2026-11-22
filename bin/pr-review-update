@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-upstream="${PR_REVIEW_UPDATE_UPSTREAM:-https://github.com/thelarklanlabs/pr-review.git}"
+upstream="${PR_REVIEW_UPDATE_UPSTREAM:-https://github.com/thelarklan/pr-review.git}"
 remote_name="${PR_REVIEW_UPDATE_REMOTE:-origin}"
 branch="${PR_REVIEW_UPDATE_BRANCH:-main}"
 source_dir="${PR_REVIEW_UPDATE_SOURCE:-$HOME/projects/repos/pr-review}"

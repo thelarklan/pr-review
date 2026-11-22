@@ -3,6 +3,9 @@
 Use this runbook to rebuild the review system from nothing, or to move it to a new organization.
 Each step uses a file or a script in this repository.
 
+Until the transfer to `thelarklanlabs`, the repository is at `https://github.com/thelarklan/pr-review`.
+The commands below use the target URL. Before the transfer, replace `thelarklanlabs/pr-review` with `thelarklan/pr-review`.
+
 | Part | Source in this repository |
 | --- | --- |
 | GitHub App definition | `github/app-manifest.json` |

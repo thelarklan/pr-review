@@ -4,7 +4,7 @@
 set -euo pipefail
 
 repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-default_upstream=https://github.com/thelarklanlabs/pr-review.git
+default_upstream=https://github.com/thelarklan/pr-review.git
 
 usage() {
     printf 'usage: %s --role codex|claude|gemini|services [--print-crontab] [--no-crontab]\n' "$0" >&2
