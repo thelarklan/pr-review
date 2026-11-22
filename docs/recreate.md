@@ -4,7 +4,22 @@ Use this runbook to rebuild the review system from nothing, or to move it to a n
 Each step uses a file or a script in this repository.
 
 Until the transfer to `thelarklanlabs`, the repository is at `https://github.com/thelarklan/pr-review`.
-The commands below use the target URL. Before the transfer, replace `thelarklanlabs/pr-review` with `thelarklan/pr-review`.
+The `git clone` commands below use the target URL. Before the transfer, clone from `thelarklan/pr-review` instead.
+Do not change any other command. In particular, do not enroll a repository before it belongs to the organization.
+
+## Which App serves which owner
+
+Each App is private, so it can publish checks only for the account that owns it.
+A ruleset must require the check from the App of the repository owner.
+Otherwise the check never arrives, and every pull request is blocked.
+
+| Repository owner | App | App ID | Config on `services` |
+| --- | --- | --- | --- |
+| `thelarklanlabs` (organization) | `thelarklanlabs-bot-review-quorum` | `5877283` | `~/.config/pr-review/thelarklanlabs.env` |
+| `thelarklan` (user account) | `thelarklan-bot-review-quorum` | `4752010` | `~/.config/pr-review/pr-review-quorum.env` |
+
+`scripts/enroll-repo.sh` confirms that the App is installed for an organization before it changes anything.
+It cannot confirm this for a user account. For a user account, confirm it yourself, then add `--skip-install-check`.
 
 | Part | Source in this repository |
 | --- | --- |
@@ -86,22 +101,22 @@ The private key goes only to `services`.
 
 ## 2. Enroll each repository
 
+Enroll only repositories that the organization owns.
+For a repository on another account, do section 4 first.
 Run this step with a `gh` login that is an owner of the organization.
 
 ```bash
-scripts/enroll-repo.sh thelarklanlabs/pr-review --app-id APP_ID --check verify
-scripts/enroll-repo.sh thelarklanlabs/lol --app-id APP_ID
-scripts/enroll-repo.sh thelarklanlabs/wsl-tools --app-id APP_ID \
-  --check powershell --check shell --check windows-powershell
-scripts/enroll-repo.sh thelarklanlabs/jenkins-controller --app-id APP_ID
-scripts/enroll-repo.sh thelarklanlabs/podman-tools --app-id APP_ID
+scripts/enroll-repo.sh thelarklanlabs/pr-review --app-id 5877283 --check verify --dry-run
+scripts/enroll-repo.sh thelarklanlabs/pr-review --app-id 5877283 --check verify
 ```
 
-- Add `--dry-run` to see the ruleset and the planned calls first.
-- The script sets squash merge only, gives the three bots write access, and writes the ruleset.
-- It updates an existing "main protection" ruleset in place. Run it again after you change the App.
+- The script stops before any change if the App is not installed on the organization for all repositories.
+- It sets squash merge only, gives the three bots write access, and writes the "main protection" ruleset.
+- It allows auto-merge only on public repositories, because GitHub Free allows it only there.
+- On an existing ruleset, it keeps the CI checks and the rules and parameters that the template does not define.
+  The template wins for approvals, merge methods, and bypass actors.
 - GitHub Free enforces rulesets only on public repositories.
-  On a private repository, `bot-review-quorum` is advisory.
+  On a private repository, the script skips the ruleset, and `bot-review-quorum` is advisory.
 
 ## 3. Install each bot host
 
@@ -121,10 +136,22 @@ Run these steps on `codex`, `claude`, and `gemini`.
    bash ~/projects/repos/pr-review/install.sh --role ROLE
    ```
 
-## 4. Move the repository to a new owner
+## 4. Move a repository into the organization
 
-1. Transfer the repository on GitHub.
-2. On each host, point the clone at the new URL and install the role again:
+Do these steps without a pause.
+After the transfer, the old ruleset still requires the check from the user-account App.
+That App cannot publish in the organization, so pull requests stay blocked until step 3.
+
+1. Make sure that `services` runs the organization App: `crontab -l` shows a line for `thelarklanlabs.env`.
+2. Transfer the repository on GitHub.
+3. Enroll it with the organization App (section 2). Use `--dry-run` first.
+4. Confirm the check: on an open pull request, `bot-review-quorum` comes from `thelarklanlabs-bot-review-quorum`.
+
+## 5. Move this repository to a new owner
+
+Do section 4 for this repository first. Then:
+
+1. On each host, point the clone at the new URL and install the role again:
 
    ```bash
    cd ~/projects/repos/pr-review
@@ -133,9 +160,9 @@ Run these steps on `codex`, `claude`, and `gemini`.
    ```
 
    `install.sh` reads the updater URL from the `origin` remote.
-3. Update `PR_REVIEW_OWNER` and `PR_REVIEW_ALERT_REPO` in `hosts/*.env` with a pull request.
+2. Update `PR_REVIEW_OWNER` and `PR_REVIEW_ALERT_REPO` in `hosts/*.env` with a pull request.
 
-## 5. Export the live configuration
+## 6. Export the live configuration
 
 Compare the live rulesets with `github/rulesets/main.json`:
 

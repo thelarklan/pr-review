@@ -17,12 +17,10 @@ The `bot-review-quorum` check requires full 3-of-3 exact-head approval across `{
 
 ## Enroll a repository
 
-1. Find the App ID in the private config on `services`:
-
-   ```bash
-   grep '^QUORUM_APP_ID=' ~/.config/pr-review/thelarklanlabs.env
-   ```
-
+1. Use the App of the repository owner. See "Which App serves which owner" in `docs/recreate.md`.
+   - `thelarklanlabs`: App ID `5877283`.
+   - `thelarklan`: App ID `4752010`. Add `--skip-install-check` after you confirm the installation.
+   - A repository that is moving to `thelarklanlabs`: transfer it first, then enroll it. See section 4 of `docs/recreate.md`.
 2. Preview the changes:
 
    ```bash

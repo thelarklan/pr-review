@@ -2,11 +2,13 @@
 # Enroll a repository in bot review: merge settings, bot access, and the "main protection" ruleset.
 # The command is idempotent. Run it again after a transfer or when the App changes.
 #
-# usage: enroll-repo.sh OWNER/REPO --app-id ID [--check NAME[:INTEGRATION_ID]]... [--replace-checks] [--dry-run]
-#   --app-id          ID of the bot-review-quorum GitHub App. The ruleset requires its check.
-#   --check           Another required check. The default integration is GitHub Actions (15368).
-#   --replace-checks  Drop the CI checks of the existing ruleset. By default the script keeps them.
-#   --dry-run         Print the ruleset and the planned API calls. Change nothing.
+# usage: enroll-repo.sh OWNER/REPO --app-id ID [--check NAME[:INTEGRATION_ID]]... [--replace-checks]
+#                       [--skip-install-check] [--dry-run]
+#   --app-id              ID of the bot-review-quorum App installed for OWNER. The ruleset requires its check.
+#   --check               Another required check. The default integration is GitHub Actions (15368).
+#   --replace-checks      Drop the CI checks of the existing ruleset. By default the script keeps them.
+#   --skip-install-check  Skip the check that the App is installed for OWNER. Use it only after you confirm that.
+#   --dry-run             Print the ruleset and the planned API calls. Change nothing.
 set -euo pipefail
 
 repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -15,7 +17,7 @@ bots=(larkbot-codex larkbot-claude larkbot-gemini)
 actions_integration_id=15368
 
 usage() {
-    sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+    sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
 }
 
 fail() {
@@ -30,6 +32,7 @@ shift
 app_id=""
 dry_run=0
 replace_checks=0
+skip_install_check=0
 checks_json='[]'
 while (($# > 0)); do
     case "$1" in
@@ -58,6 +61,10 @@ while (($# > 0)); do
             replace_checks=1
             shift
             ;;
+        --skip-install-check)
+            skip_install_check=1
+            shift
+            ;;
         *)
             usage
             exit 2
@@ -77,6 +84,26 @@ run() {
 
 visibility=$(gh api "repos/$repo" --jq '.visibility') || fail "cannot read $repo"
 printf '%s (%s)\n' "$repo" "$visibility"
+
+# The ruleset will require a check from this App. If the App is not installed for the repository,
+# that check can never pass and every pull request is blocked. Confirm it before any change.
+owner="${repo%%/*}"
+if ((skip_install_check == 0)); then
+    owner_type=$(gh api "users/$owner" --jq '.type') || fail "cannot read account $owner"
+    if [[ "$owner_type" != Organization ]]; then
+        fail "cannot confirm App installations on user account $owner with a personal token. Confirm that App $app_id is installed for $repo, then run again with --skip-install-check."
+    fi
+    selection=$(gh api "orgs/$owner/installations" \
+        --jq ".installations[] | select(.app_id == $app_id) | .repository_selection") ||
+        fail "cannot list App installations on $owner"
+    if [[ -z "$selection" ]]; then
+        fail "App $app_id is not installed on $owner, so its check could never pass on $repo. Install the App or use the App of this owner."
+    fi
+    if [[ "$selection" != all ]]; then
+        fail "App $app_id is installed on $owner for selected repositories only. Confirm that it includes $repo, then run again with --skip-install-check."
+    fi
+    printf 'App %s: installed on %s for all repositories\n' "$app_id" "$owner"
+fi
 
 # GitHub Free allows auto-merge only on public repositories, so send the field only for them.
 merge_settings=(

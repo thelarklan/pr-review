@@ -28,6 +28,15 @@ if [[ "$FAKE_VISIBILITY" == private && "$*" == *"-X PATCH"* && "$*" == *allow_au
     exit 1
 fi
 case "$*" in
+    "api users/thelarklanlabs --jq .type")
+        printf '%s\n' "${FAKE_OWNER_TYPE:-Organization}"
+        ;;
+    "api orgs/thelarklanlabs/installations --jq "*)
+        # The real call filters by app_id with jq. Here App 999 is the installed one.
+        if [[ "$*" == *"app_id == 999)"* ]]; then
+            printf '%s\n' "${FAKE_SELECTION:-all}"
+        fi
+        ;;
     "api repos/thelarklanlabs/example --jq .visibility")
         printf '%s\n' "$FAKE_VISIBILITY"
         ;;
@@ -168,6 +177,31 @@ if grep -Eq -- '-X (PATCH|PUT|POST)' "$test_dir/calls"; then
 fi
 grep -Fq 'would run: gh api -X POST repos/thelarklanlabs/example/rulesets' "$test_dir/out" ||
     fail "dry run did not show the planned ruleset call"
+
+# The App must be installed for the owner before the ruleset requires its check.
+assert_refused_without_writes() {
+    local message="$1"
+    shift
+    if run_enroll FAKE_VISIBILITY=public "$@" >"$test_dir/out" 2>"$test_dir/err"; then
+        fail "$message"
+    fi
+    if grep -Eq -- '-X (PATCH|PUT|POST)' "$test_dir/calls"; then
+        fail "$message: GitHub was changed before the refusal"
+    fi
+}
+assert_refused_without_writes "App not installed on the owner was accepted" \
+    "$enroll" thelarklanlabs/example --app-id 4752010
+grep -Fq 'App 4752010 is not installed on thelarklanlabs' "$test_dir/err" || fail "missing installation was not explained"
+assert_refused_without_writes "App with selected repositories was accepted without confirmation" \
+    FAKE_SELECTION=selected "$enroll" thelarklanlabs/example --app-id 999
+assert_refused_without_writes "user-owned repository was accepted without confirmation" \
+    FAKE_OWNER_TYPE=User "$enroll" thelarklanlabs/example --app-id 999
+grep -Fq -- '--skip-install-check' "$test_dir/err" || fail "user-owned refusal did not name the override"
+run_enroll FAKE_VISIBILITY=public FAKE_OWNER_TYPE=User "$enroll" thelarklanlabs/example \
+    --app-id 999 --skip-install-check >"$test_dir/out" || fail "--skip-install-check did not proceed"
+if grep -Fq 'api users/' "$test_dir/calls"; then
+    fail "--skip-install-check still checked the installation"
+fi
 
 # Invalid input.
 if run_enroll FAKE_VISIBILITY=public "$enroll" thelarklanlabs/example --app-id abc >/dev/null 2>&1; then
