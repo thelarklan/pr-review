@@ -198,11 +198,19 @@ assert_refused_without_writes "App not installed on the owner was accepted" \
     "$enroll" thelarklanlabs/example --app-id 4752010
 grep -Fq 'App 4752010 is not installed on thelarklanlabs' "$test_dir/err" || fail "missing installation was not explained"
 installation_json() {
-    local selection="$1" suspended_at="$2" checks="$3"
+    local selection="$1" suspended_at="$2" checks="$3" pulls="${4:-write}"
     jq -cn --arg selection "$selection" --argjson suspended_at "$suspended_at" --arg checks "$checks" \
+        --arg pulls "$pulls" \
         '{installations: [{app_id: 999, repository_selection: $selection, suspended_at: $suspended_at,
-          permissions: {checks: $checks, metadata: "read"}}]}'
+          permissions: ({checks: $checks, metadata: "read"}
+            + (if $pulls == "none" then {} else {pull_requests: $pulls} end))}]}'
 }
+assert_refused_without_writes "App installation without pull_requests access was accepted" \
+    FAKE_INSTALLATIONS="$(installation_json all null write none)" "$enroll" thelarklanlabs/example --app-id 999
+grep -Fq "has pull_requests permission 'none'" "$test_dir/err" || fail "pull_requests permission was not explained"
+run_enroll FAKE_VISIBILITY=public FAKE_INSTALLATIONS="$(installation_json all null write read)" \
+    "$enroll" thelarklanlabs/example --app-id 999 >"$test_dir/out" ||
+    fail "pull_requests read was not accepted"
 assert_refused_without_writes "App with selected repositories was accepted without confirmation" \
     FAKE_INSTALLATIONS="$(installation_json selected null write)" "$enroll" thelarklanlabs/example --app-id 999
 assert_refused_without_writes "suspended App installation was accepted" \

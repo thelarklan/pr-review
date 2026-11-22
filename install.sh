@@ -92,6 +92,7 @@ render_cron_block() {
             return 1
         fi
         # The updater holds every quorum lock, so it never replaces the checkout during a quorum pass.
+        # Schedule only the configs that exist, so an organization-only rebuild has no failing job.
         update_lock=""
         for config_file in "${config_list[@]}"; do
             config_name=$(basename -- "$config_file" .env)
@@ -99,11 +100,19 @@ render_cron_block() {
                 printf 'install.sh: unsafe quorum config name: %s\n' "$config_file" >&2
                 return 1
             fi
+            if [[ ! -f "${config_file/\$HOME/$HOME}" ]]; then
+                printf 'install.sh: not scheduling %s: the file does not exist\n' "$config_file" >&2
+                continue
+            fi
             line=$(printf '%s /usr/bin/flock -n "$HOME/.cache/pr-review-quorum/%s.lock" /usr/bin/env QUORUM_CONFIG_FILE="%s" "%s/bin/pr-review-quorum" >>"$HOME/.local/state/pr-review-quorum/cron.log" 2>&1' \
                 "$PR_REVIEW_CRON_SCHEDULE" "$config_name" "$config_file" "$repo_dir")
             runner_cmd+="${runner_cmd:+$'\n'}$line"
             update_lock+="${update_lock:+ }\$HOME/.cache/pr-review-quorum/$config_name.lock"
         done
+        if [[ -z "$runner_cmd" ]]; then
+            printf 'install.sh: no quorum config in QUORUM_CONFIG_FILES exists. Create one first (docs/recreate.md, section 1).\n' >&2
+            return 1
+        fi
     else
         local -a env_parts=(
             "PR_REVIEW_PROVIDER=$PR_REVIEW_PROVIDER"

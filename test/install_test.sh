@@ -47,7 +47,25 @@ assert_contains "$gemini_cron" 'PR_REVIEW_GEMINI_DRIVER=agy' "gemini driver mism
 assert_contains "$gemini_cron" 'PR_REVIEW_ANTIGRAVITY_MODEL=gemini-4-neon-high' "gemini model mismatch"
 assert_contains "$gemini_cron" 'PR_REVIEW_ANTIGRAVITY_EFFORT=""' "gemini effort should be empty"
 
-services_cron=$("$install_dir/install.sh" --role services --print-crontab)
+# services schedules only the quorum configs that exist.
+services_home="$test_dir/services-home"
+mkdir -p "$services_home/.config/pr-review"
+touch "$services_home/.config/pr-review/thelarklanlabs.env"
+org_only_cron=$(HOME="$services_home" "$install_dir/install.sh" --role services --print-crontab 2>"$test_dir/org-only.err")
+[[ "$(grep -c 'bin/pr-review-quorum"' <<<"$org_only_cron")" == 1 ]] ||
+    fail "organization-only rebuild must schedule one quorum job"
+assert_contains "$org_only_cron" 'PR_REVIEW_UPDATE_LOCK="$HOME/.cache/pr-review-quorum/thelarklanlabs.lock"' \
+    "organization-only updater lock mismatch"
+grep -Fq 'not scheduling $HOME/.config/pr-review/pr-review-quorum.env' "$test_dir/org-only.err" ||
+    fail "skipped config was not reported"
+empty_home="$test_dir/empty-home"
+mkdir -p "$empty_home"
+if HOME="$empty_home" "$install_dir/install.sh" --role services --print-crontab >/dev/null 2>&1; then
+    fail "services schedule without any quorum config was accepted"
+fi
+
+touch "$services_home/.config/pr-review/pr-review-quorum.env"
+services_cron=$(HOME="$services_home" "$install_dir/install.sh" --role services --print-crontab)
 assert_contains "$services_cron" '* * * * * ' "services schedule missing"
 assert_contains "$services_cron" '/pr-review-quorum.lock" /usr/bin/env QUORUM_CONFIG_FILE="$HOME/.config/pr-review/pr-review-quorum.env"' "services user-account config missing"
 assert_contains "$services_cron" '/thelarklanlabs.lock" /usr/bin/env QUORUM_CONFIG_FILE="$HOME/.config/pr-review/thelarklanlabs.env"' "services organization config missing"

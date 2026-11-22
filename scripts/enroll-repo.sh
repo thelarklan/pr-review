@@ -95,12 +95,16 @@ if ((skip_install_check == 0)); then
     fi
     # Fields joined with "|" so that an empty field (for example suspended_at) keeps its place.
     installation=$(gh api "orgs/$owner/installations" \
-        --jq ".installations[] | select(.app_id == $app_id) | [.repository_selection, (.suspended_at // \"\"), (.permissions.checks // \"\")] | join(\"|\")") ||
+        --jq ".installations[] | select(.app_id == $app_id) | [.repository_selection, (.suspended_at // \"\"), (.permissions.checks // \"\"), (.permissions.pull_requests // \"\")] | join(\"|\")") ||
         fail "cannot list App installations on $owner"
     if [[ -z "$installation" ]]; then
         fail "App $app_id is not installed on $owner, so its check could never pass on $repo. Install the App or use the App of this owner."
     fi
-    IFS='|' read -r selection suspended_at checks_permission <<<"$installation"
+    IFS='|' read -r selection suspended_at checks_permission pulls_permission <<<"$installation"
+    # The evaluator lists pull requests and reviews, which needs pull_requests read or write.
+    if [[ "$pulls_permission" != read && "$pulls_permission" != write ]]; then
+        fail "App $app_id has pull_requests permission '${pulls_permission:-none}' on $owner. It needs read or write to evaluate reviews."
+    fi
     if [[ -n "$suspended_at" ]]; then
         fail "App $app_id is suspended on $owner since $suspended_at, so its check could never pass on $repo. Unsuspend the installation first."
     fi

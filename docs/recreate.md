@@ -86,6 +86,9 @@ The private key goes only to `services`.
     ```
 
 12. Make sure that `QUORUM_CONFIG_FILES` in `hosts/services.env` names this file.
+    `install.sh` schedules only the configs in that list that exist, and reports each one it skips.
+    In a rebuild for the organization only, it skips `pr-review-quorum.env` (the user-account App).
+    To keep the user-account App, restore its config and key, then run a foreground audit with that file too.
 13. Run one foreground audit:
 
     ```bash
