@@ -166,7 +166,7 @@ case "\$method \$url" in
         printf '%s\n' '{"token":"installation-token"}'
         ;;
     *'/installation/repositories?per_page=100&page=1')
-        printf '%s\n' '{"repositories":[{"full_name":"thelarklan/example","owner":{"id":166922787},"default_branch":"main"}]}'
+        printf '{"repositories":[{"full_name":"thelarklan/example","owner":{"id":%s},"default_branch":"main"}]}\n' "\${FAKE_REPO_OWNER_ID:-166922787}"
         ;;
     *'/repos/thelarklan/example/pulls?state=open&per_page=100&page=1')
         printf '%s\n' '[{"number":7}]'
@@ -290,6 +290,26 @@ integration_output=$(FAKE_AUTHOR=owner GRAPHQL_LOG="$graphql_log" \
     fail 'owner PR with all three bots did not publish success'
 [[ "$(jq -r '.auto_merge_action' <<<"$integration_output")" == armed ]] || \
     fail 'owner PR with all three bots did not arm auto-merge'
+
+# An organization-owned repository is skipped unless its owner ID is listed.
+org_id=323226749
+unlisted_output=$(FAKE_REPO_OWNER_ID="$org_id" GRAPHQL_LOG="$graphql_log" \
+    QUORUM_CONFIG_FILE="$config_file" "$project_dir/bin/pr-review-quorum")
+[[ -z "$unlisted_output" ]] || \
+    fail 'repository of an unlisted owner was evaluated'
+
+org_output=$(FAKE_REPO_OWNER_ID="$org_id" FAKE_AUTHOR=owner GRAPHQL_LOG="$graphql_log" \
+    QUORUM_REPOSITORY_OWNER_IDS="166922787,$org_id" \
+    QUORUM_CONFIG_FILE="$config_file" "$project_dir/bin/pr-review-quorum")
+[[ "$(jq -r '.conclusion' <<<"$org_output")" == success ]] || \
+    fail 'organization repository with a listed owner ID was not evaluated'
+[[ "$(jq -r '.author_id' <<<"$org_output")" == 166922787 ]] || \
+    fail 'human approver must stay separate from the repository owner'
+
+if QUORUM_REPOSITORY_OWNER_IDS="166922787,org" QUORUM_CONFIG_FILE="$config_file" \
+    "$project_dir/bin/pr-review-quorum" >/dev/null 2>&1; then
+    fail 'non-numeric QUORUM_REPOSITORY_OWNER_IDS was accepted'
+fi
 
 head_change_pull_counter="$test_dir/head-change-pulls"
 before_mutations=$(wc -l <"$graphql_log")

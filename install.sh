@@ -4,6 +4,7 @@
 set -euo pipefail
 
 repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+default_upstream=https://github.com/thelarklan/pr-review.git
 
 usage() {
     printf 'usage: %s --role codex|claude|gemini|services [--print-crontab] [--no-crontab]\n' "$0" >&2
@@ -68,7 +69,9 @@ PR_REVIEW_ANTIGRAVITY_MODEL=""
 PR_REVIEW_ANTIGRAVITY_EFFORT=""
 PR_REVIEW_PATH=""
 PR_REVIEW_ALERT_REPO=""
+PR_REVIEW_OWNER=""
 QUORUM_CONFIG_FILE=""
+QUORUM_CONFIG_FILES=""
 PR_REVIEW_UPDATE_LOCK=""
 
 # shellcheck source=/dev/null
@@ -79,13 +82,46 @@ render_cron_block() {
     local runner_cmd=""
 
     if [[ "$role" == "services" ]]; then
-        runner_cmd=$(printf '%s /usr/bin/flock -n "$HOME/.cache/pr-review-quorum/cron.lock" /usr/bin/env QUORUM_CONFIG_FILE="%s" "%s/bin/pr-review-quorum" >>"$HOME/.local/state/pr-review-quorum/cron.log" 2>&1' \
-            "$PR_REVIEW_CRON_SCHEDULE" "$QUORUM_CONFIG_FILE" "$repo_dir")
+        # One quorum pass per GitHub App installation, each with its own lock.
+        local config_files="${QUORUM_CONFIG_FILES:-$QUORUM_CONFIG_FILE}"
+        local config_file config_name line
+        local -a config_list=()
+        read -r -a config_list <<<"$config_files"
+        if ((${#config_list[@]} == 0)); then
+            printf 'install.sh: services role needs QUORUM_CONFIG_FILES\n' >&2
+            return 1
+        fi
+        # The updater holds every quorum lock, so it never replaces the checkout during a quorum pass.
+        # The lock list uses ":" as separator, so a path with a space stays one path.
+        # Schedule only the configs that exist, so an organization-only rebuild has no failing job.
+        update_lock=""
+        for config_file in "${config_list[@]}"; do
+            config_name=$(basename -- "$config_file" .env)
+            if [[ ! "$config_name" =~ ^[A-Za-z0-9._-]+$ ]]; then
+                printf 'install.sh: unsafe quorum config name: %s\n' "$config_file" >&2
+                return 1
+            fi
+            if [[ ! -f "${config_file/\$HOME/$HOME}" ]]; then
+                printf 'install.sh: not scheduling %s: the file does not exist\n' "$config_file" >&2
+                continue
+            fi
+            line=$(printf '%s /usr/bin/flock -n "$HOME/.cache/pr-review-quorum/%s.lock" /usr/bin/env QUORUM_CONFIG_FILE="%s" "%s/bin/pr-review-quorum" >>"$HOME/.local/state/pr-review-quorum/cron.log" 2>&1' \
+                "$PR_REVIEW_CRON_SCHEDULE" "$config_name" "$config_file" "$repo_dir")
+            runner_cmd+="${runner_cmd:+$'\n'}$line"
+            update_lock+="${update_lock:+:}\$HOME/.cache/pr-review-quorum/$config_name.lock"
+        done
+        if [[ -z "$runner_cmd" ]]; then
+            printf 'install.sh: no quorum config in QUORUM_CONFIG_FILES exists. Create one first (docs/recreate.md, section 1).\n' >&2
+            return 1
+        fi
     else
         local -a env_parts=(
             "PR_REVIEW_PROVIDER=$PR_REVIEW_PROVIDER"
             "PR_REVIEW_REVIEWER=$PR_REVIEW_REVIEWER"
         )
+        if [[ -n "$PR_REVIEW_OWNER" ]]; then
+            env_parts+=("PR_REVIEW_OWNER=$PR_REVIEW_OWNER")
+        fi
         case "$PR_REVIEW_PROVIDER" in
             codex)
                 env_parts+=(
@@ -115,9 +151,19 @@ render_cron_block() {
             "$PR_REVIEW_CRON_SCHEDULE" "${env_parts[*]}" "$repo_dir")
     fi
 
+    # The updater pulls from the same URL as the origin remote of this clone.
+    # To move the repository, run "git remote set-url origin <url>" and then run install.sh again.
+    local upstream
+    upstream=$(git -C "$repo_dir" remote get-url origin 2>/dev/null || true)
+    upstream="${upstream:-$default_upstream}"
+    if [[ ! "$upstream" =~ ^https://[A-Za-z0-9._/-]+$ ]]; then
+        printf 'install.sh: origin remote must be an https URL: %s\n' "$upstream" >&2
+        return 1
+    fi
+
     local update_cmd
-    update_cmd=$(printf '19 * * * * /usr/bin/env PR_REVIEW_ROLE=%s PR_REVIEW_UPDATE_SOURCE="%s" PR_REVIEW_UPDATE_UPSTREAM=https://github.com/thelarklan/pr-review.git PR_REVIEW_UPDATE_LOCK="%s" "%s/bin/pr-review-update"' \
-        "$role" "$repo_dir" "$update_lock" "$repo_dir")
+    update_cmd=$(printf '19 * * * * /usr/bin/env PR_REVIEW_ROLE=%s PR_REVIEW_UPDATE_SOURCE="%s" PR_REVIEW_UPDATE_UPSTREAM=%s PR_REVIEW_UPDATE_LOCK="%s" "%s/bin/pr-review-update"' \
+        "$role" "$repo_dir" "$upstream" "$update_lock" "$repo_dir")
 
     printf '# BEGIN pr-review\n%s\n%s\n# END pr-review\n' "$runner_cmd" "$update_cmd"
 }

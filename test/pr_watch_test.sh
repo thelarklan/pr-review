@@ -110,6 +110,16 @@ run_watch() {
 run_watch new-head "$test_dir/new-head.state"
 [[ "$watch_status" -eq 0 ]] || fail "new-head watch failed"
 [[ "$(cat "$test_dir/stdout")" == "thelarklan/repo#1" ]] || fail "new head was not reported"
+grep -Fq 'search prs --owner thelarklan --state open' "$test_dir/gh-calls" || \
+    fail "default owner was not searched"
+
+run_watch new-head "$test_dir/two-owners.state" PR_WATCH_OWNER=thelarklan,thelarklanlabs
+[[ "$watch_status" -eq 0 ]] || fail "two-owner watch failed"
+grep -Fq 'search prs --owner thelarklan --owner thelarklanlabs --state open' "$test_dir/gh-calls" || \
+    fail "both owners were not searched in one call"
+
+run_watch new-head "$test_dir/bad-owner.state" 'PR_WATCH_OWNER=thelarklan;other'
+[[ "$watch_status" -eq 2 ]] || fail "invalid owner list was accepted"
 
 touch "$test_dir/persistent-lock.state.lock"
 run_watch new-head "$test_dir/persistent-lock.state"

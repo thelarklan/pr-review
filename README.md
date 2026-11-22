@@ -17,6 +17,10 @@ The cohort contains four accounts: `thelarklan`, `larkbot-codex`, `larkbot-claud
 - `bin/pr-review-update`: Fast-forwards the repository clone from `origin/main` and runs verification.
 - `hosts/`: Per-role environment configuration (`codex`, `claude`, `gemini`, `services`).
 - `install.sh`: Prepares directories and installs the managed crontab block for a selected role.
+- `github/`: The GitHub App manifest and the repository ruleset template.
+- `scripts/create-app.sh`: Creates the GitHub App from the manifest and writes its private config.
+- `scripts/enroll-repo.sh`: Applies merge settings, bot access, and the ruleset to one repository.
+- `docs/recreate.md`: Rebuilds the whole system from this repository.
 
 ## Install a host role
 
@@ -30,6 +34,7 @@ bash install.sh --role codex   # or claude, gemini, services
 ```
 
 Cron jobs execute directly from the clone instead of copying binaries to `~/.local/bin`.
+Each bot reviewer runs each minute. Its lock skips a run while the previous review is still going.
 All roles run `bin/pr-review-update` hourly at minute `19` (`19 * * * *`).
 The updater shares the review lock and waits up to 50 minutes for a running review to finish.
 It verifies each new commit in a temporary export before it moves the live clone.
@@ -39,9 +44,9 @@ A failed verification leaves the live clone and crontab unchanged.
 
 | Role | Provider | Model | Reasoning or effort option |
 | --- | --- | --- | --- |
-| `codex` | `codex` | `gpt-6.2-sol` | `PR_REVIEW_CODEX_EFFORT=high` |
-| `claude` | `claude` | `claude-opus-5-5` | `PR_REVIEW_CLAUDE_EFFORT=high` |
-| `gemini` | `agy` | `gemini-4-neon-high` | Empty (`--effort` omitted) |
+| `codex` | `codex` | `gpt-6.2-sol` | `PR_REVIEW_CODEX_EFFORT=medium` |
+| `claude` | `claude` | `claude-opus-5-5` | `PR_REVIEW_CLAUDE_EFFORT=medium` |
+| `gemini` | `agy` | `gemini-4-neon-medium` | In the model name. `--effort` is omitted. |
 
 Set `PR_REVIEW_ALERT_REPO=thelarklan/pr-review` to open or update one health issue on escalations or auth failures.
 Store optional unattended tokens (such as `CLAUDE_CODE_OAUTH_TOKEN`) in `~/.config/pr-review/provider.env` with mode `600`.

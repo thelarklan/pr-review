@@ -50,9 +50,11 @@ git clone --bare "$upstream_work" "$upstream_repo" >/dev/null
 git -C "$upstream_work" remote add publish "$upstream_repo"
 
 lock_wait_seconds=10
+update_locks="$cache_dir/pr-review/cron.lock"
 
 run_update() {
     PR_REVIEW_UPDATE_LOCK_WAIT="$lock_wait_seconds" \
+    PR_REVIEW_UPDATE_LOCK="$update_locks" \
     HOME="$home_dir" \
     XDG_STATE_HOME="$state_dir" \
     XDG_CACHE_HOME="$cache_dir" \
@@ -87,6 +89,29 @@ lock_wait_seconds=10
 flock -u 9
 exec 9>&-
 [[ "$(grep -Fc verify "$trace_file")" == 1 ]] || fail "busy updater ran verification"
+
+# services runs one quorum job per App, each with its own lock. The updater must hold all of them.
+# Hold only the second lock: the updater must still skip.
+second_lock="$cache_dir/pr review quorum/second.lock"
+mkdir -p "$(dirname "$second_lock")"
+update_locks="$lock_file:$second_lock"
+exec 8>"$second_lock"
+flock -n 8 || fail "test could not acquire the second lock"
+lock_wait_seconds=0
+skipped_before=$(grep -Fc "$second_lock is busy" "$state_dir/pr-review-update/cron.log" || true)
+run_update
+lock_wait_seconds=10
+flock -u 8
+exec 8>&-
+[[ "$(grep -Fc "$second_lock is busy" "$state_dir/pr-review-update/cron.log")" == $((skipped_before + 1)) ]] ||
+    fail "updater ignored a busy evaluator lock"
+[[ "$(grep -Fc verify "$trace_file")" == 1 ]] || fail "updater ran while an evaluator lock was held"
+# With both locks free, a lock path with a space works.
+already_before=$(grep -Fc "already at verified commit" "$state_dir/pr-review-update/cron.log")
+run_update
+[[ "$(grep -Fc "already at verified commit" "$state_dir/pr-review-update/cron.log")" == $((already_before + 1)) ]] ||
+    fail "updater failed with a lock path that contains a space"
+update_locks="$lock_file"
 
 # A review that holds the lock for a short time must delay the update, not skip it.
 (
@@ -152,7 +177,7 @@ fi
 [[ "$(grep -Fc 'install:--role codex' "$trace_file")" == 2 ]] || \
     fail "non-fast-forward attempt ran installation"
 
-grep -Fq 'shared lock is busy after 0s; update skipped' \
+grep -Fq "shared lock $lock_file is busy after 0s; update skipped" \
     "$state_dir/pr-review-update/cron.log" || fail "busy update was not logged"
 grep -Fq 'source checkout has local changes' \
     "$state_dir/pr-review-update/cron.log" || fail "dirty checkout refusal was not logged"
