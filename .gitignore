@@ -1,0 +1,6 @@
+*.env
+!*.env.example
+!hosts/*.env
+*.pem
+repo-policy.json
+protected-paths.json

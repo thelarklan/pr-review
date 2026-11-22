@@ -1,6 +1,34 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
+explicit_provider_env=0
+if [[ -n "${PR_REVIEW_PROVIDER_ENV_FILE:-}" ]]; then
+    explicit_provider_env=1
+    provider_env_file="$PR_REVIEW_PROVIDER_ENV_FILE"
+else
+    provider_env_file="$HOME/.config/pr-review/provider.env"
+fi
+
+if [[ -e "$provider_env_file" ]]; then
+    if [[ ! -f "$provider_env_file" ]]; then
+        printf 'pr-review-cron: provider env path is not a regular file: %s\n' "$provider_env_file" >&2
+        exit 1
+    fi
+    if [[ -n "$(find "$provider_env_file" -maxdepth 0 -perm /077 -print -quit)" ]]; then
+        printf 'pr-review-cron: provider env permissions are too broad; run chmod 600 on %s\n' "$provider_env_file" >&2
+        exit 1
+    fi
+    set -a
+    # shellcheck source=/dev/null
+    source "$provider_env_file"
+    set +a
+elif (( explicit_provider_env == 1 )); then
+    printf 'pr-review-cron: missing provider env file: %s\n' "$provider_env_file" >&2
+    exit 1
+fi
+
 provider="${PR_REVIEW_PROVIDER:-}"
 case "$provider" in
     codex | claude | gemini) ;;
@@ -24,14 +52,16 @@ fi
 export PATH="$HOME/.local/bin:$review_path"
 export LC_ALL=C
 
-helper="${DEV_TOOLS_HELPER:-$HOME/.bashrc.d/dev-tools-git.sh}"
+pr_watch_bin="${PR_REVIEW_WATCH_BIN:-$script_dir/pr-watch}"
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/pr-review"
 cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/pr-review"
 work_root="${PR_REVIEW_WORK_ROOT:-$HOME/.local/share/pr-review/work}"
 log_file="$state_dir/cron.log"
 state_file="$state_dir/pr-watch.seen"
 failure_file="$state_dir/provider-failures"
+last_alert_file="$state_dir/last-alert-key"
 owner="${PR_REVIEW_OWNER:-${PR_WATCH_OWNER:-thelarklan}}"
+alert_repo="${PR_REVIEW_ALERT_REPO:-}"
 
 mkdir -p -- "$state_dir" "$cache_dir" "$work_root"
 touch -- "$log_file" "$state_file" "$failure_file"
@@ -42,12 +72,10 @@ fi
 exec >>"$log_file" 2>&1
 
 printf '\n[%s] %s watcher started\n' "$(date --iso-8601=seconds)" "$provider"
-if [[ ! -r "$helper" ]]; then
-    printf 'pr-review-cron: missing watcher helper %s\n' "$helper"
+if [[ ! -x "$pr_watch_bin" ]]; then
+    printf 'pr-review-cron: missing watcher executable %s\n' "$pr_watch_bin"
     exit 1
 fi
-# shellcheck source=/dev/null
-source "$helper"
 
 authenticated=$(gh api user --jq '.login') || {
     printf 'pr-review-cron: cannot read the authenticated GitHub identity\n'
@@ -66,10 +94,13 @@ candidate_state="$run_dir/state.seen"
 before_state="$run_dir/state.before"
 delta_file="$run_dir/state.delta"
 failure_next="$run_dir/provider-failures.next"
+provider_out="$run_dir/provider.out"
+alert_next="$run_dir/last-alert-key.next"
 
 cleanup() {
     rm -f -- "$work_file" "$error_file" "$candidate_state" "$before_state" \
-        "$delta_file" "$failure_next" "${candidate_state}.lock"
+        "$delta_file" "$failure_next" "$provider_out" "$alert_next" \
+        "${candidate_state}.lock"
     rmdir -- "$run_dir" 2>/dev/null || true
 }
 trap cleanup EXIT HUP INT TERM
@@ -78,12 +109,13 @@ sort -u -- "$state_file" >"$before_state"
 cp -- "$before_state" "$candidate_state"
 
 set +e
+PR_WATCH_STATE="$candidate_state" \
 DEV_TOOLS_PR_WATCH_STATE="$candidate_state" \
 PR_WATCH_OWNER="$owner" \
 PR_WATCH_REVIEWER="$reviewer" \
 PR_WATCH_MAX_FOLLOWUPS="${PR_REVIEW_MAX_FOLLOWUPS:-2}" \
 PR_WATCH_VERBOSE=1 \
-pr-watch >"$work_file" 2>"$error_file"
+"$pr_watch_bin" >"$work_file" 2>"$error_file"
 watch_status=$?
 set -e
 
@@ -165,32 +197,49 @@ resolve_executable() {
 
 run_provider() {
     local prompt="$1" executable driver
+    local codex_model codex_effort claude_model claude_effort agy_model agy_effort
+    local -a codex_args claude_args agy_args
+
     case "$provider" in
         codex)
             executable=$(resolve_executable "${PR_REVIEW_CODEX_BIN:-}" codex) || {
                 printf 'pr-review-cron: Codex CLI is not installed\n' >&2
                 return 127
             }
+            codex_model="${PR_REVIEW_CODEX_MODEL:-gpt-6.2-sol}"
+            codex_effort="${PR_REVIEW_CODEX_EFFORT:-high}"
+            codex_args=(
+                exec --ephemeral --approve-for-me --skip-git-repo-check
+                --model "$codex_model"
+            )
+            if [[ -n "$codex_effort" ]]; then
+                codex_args+=(--config "model_reasoning_effort=\"$codex_effort\"")
+            fi
+            codex_args+=(-C "$work_root" "$prompt")
             timeout --signal=TERM --kill-after=2m "${PR_REVIEW_TIMEOUT:-45m}" \
-                "$executable" exec --ephemeral --approve-for-me \
-                --skip-git-repo-check \
-                --model "${PR_REVIEW_CODEX_MODEL:-gpt-5.6-sol}" \
-                --config "model_reasoning_effort=\"${PR_REVIEW_CODEX_EFFORT:-high}\"" \
-                -C "$work_root" "$prompt"
+                "$executable" "${codex_args[@]}"
             ;;
         claude)
             executable=$(resolve_executable "${PR_REVIEW_CLAUDE_BIN:-}" claude) || {
                 printf 'pr-review-cron: Claude CLI is not installed\n' >&2
                 return 127
             }
+            claude_model="${PR_REVIEW_CLAUDE_MODEL:-claude-opus-5-5}"
+            claude_effort="${PR_REVIEW_CLAUDE_EFFORT:-high}"
+            claude_args=(
+                --print --permission-mode bypassPermissions
+                --no-session-persistence --output-format text
+                --model "$claude_model"
+            )
+            if [[ -n "$claude_effort" ]]; then
+                claude_args+=(--effort "$claude_effort")
+            fi
+            claude_args+=("$prompt")
             timeout --signal=TERM --kill-after=2m "${PR_REVIEW_TIMEOUT:-45m}" \
-                "$executable" --print --permission-mode bypassPermissions \
-                --no-session-persistence --output-format text \
-                --model "${PR_REVIEW_CLAUDE_MODEL:-claude-sonnet-5}" \
-                --effort "${PR_REVIEW_CLAUDE_EFFORT:-high}" "$prompt"
+                "$executable" "${claude_args[@]}"
             ;;
         gemini)
-            driver="${PR_REVIEW_GEMINI_DRIVER:-gemini}"
+            driver="${PR_REVIEW_GEMINI_DRIVER:-agy}"
             case "$driver" in
                 gemini)
                     executable=$(resolve_executable "${PR_REVIEW_GEMINI_BIN:-}" gemini) || {
@@ -206,12 +255,20 @@ run_provider() {
                         printf 'pr-review-cron: Antigravity CLI (agy) is not installed\n' >&2
                         return 127
                     }
+                    agy_model="${PR_REVIEW_ANTIGRAVITY_MODEL:-gemini-4-neon-high}"
+                    agy_effort="${PR_REVIEW_ANTIGRAVITY_EFFORT:-}"
+                    agy_args=(
+                        --dangerously-skip-permissions
+                        --output-format text
+                        --print-timeout "${PR_REVIEW_TIMEOUT:-45m}"
+                        --model "$agy_model"
+                    )
+                    if [[ -n "$agy_effort" ]]; then
+                        agy_args+=(--effort "$agy_effort")
+                    fi
+                    agy_args+=("--print=$prompt")
                     timeout --signal=TERM --kill-after=2m "${PR_REVIEW_TIMEOUT:-45m}" \
-                        "$executable" --dangerously-skip-permissions \
-                        --output-format text --print-timeout "${PR_REVIEW_TIMEOUT:-45m}" \
-                        --model "${PR_REVIEW_ANTIGRAVITY_MODEL:-gemini-3.7-flash-high}" \
-                        --effort "${PR_REVIEW_ANTIGRAVITY_EFFORT:-high}" \
-                        --print="$prompt"
+                        "$executable" "${agy_args[@]}"
                     ;;
                 *)
                     printf 'pr-review-cron: PR_REVIEW_GEMINI_DRIVER must be gemini or agy\n' >&2
@@ -222,11 +279,81 @@ run_provider() {
     esac
 }
 
+find_health_issue() {
+    local title="$1" issues_json
+    issues_json=$(gh issue list --repo "$alert_repo" --state open --limit 100 --json number,title) || return 1
+    jq -r --arg title "$title" '[.[] | select(.title == $title)] | first | .number // empty' <<<"$issues_json"
+}
+
+emit_health_alert() {
+    local alert_key="$1" alert_summary="$2"
+    local previous_key="" alert_title existing_issue alert_body
+
+    [[ -n "$alert_repo" ]] || return 0
+    if [[ -f "$last_alert_file" ]]; then
+        previous_key=$(<"$last_alert_file")
+    fi
+    if [[ "$alert_key" == "$previous_key" ]]; then
+        return 0
+    fi
+
+    alert_title="[bot-health] $provider ($reviewer) review alert"
+    # shellcheck disable=SC2016 # Backticks are Markdown code spans.
+    alert_body=$(printf 'Automated health alert for `%s` (`%s`) at `%s`.\n\n%s\n' \
+        "$provider" "$reviewer" "$(date --iso-8601=seconds)" "$alert_summary")
+
+    if ! existing_issue=$(find_health_issue "$alert_title"); then
+        printf 'pr-review-cron: health alert lookup failed for %s\n' "$alert_repo"
+        return 0
+    fi
+
+    if [[ -n "$existing_issue" ]]; then
+        if ! gh issue comment "$existing_issue" --repo "$alert_repo" --body "$alert_body" >/dev/null; then
+            printf 'pr-review-cron: health alert comment failed for %s#%s\n' "$alert_repo" "$existing_issue"
+            return 0
+        fi
+    else
+        if ! gh issue create --repo "$alert_repo" --title "$alert_title" --body "$alert_body" >/dev/null; then
+            printf 'pr-review-cron: health alert creation failed for %s\n' "$alert_repo"
+            return 0
+        fi
+    fi
+
+    printf '%s\n' "$alert_key" >"$alert_next"
+    mv -f -- "$alert_next" "$last_alert_file"
+}
+
+resolve_health_alert() {
+    local alert_title existing_issue
+    [[ -n "$alert_repo" && -f "$last_alert_file" ]] || return 0
+
+    alert_title="[bot-health] $provider ($reviewer) review alert"
+    if ! existing_issue=$(find_health_issue "$alert_title"); then
+        printf 'pr-review-cron: health alert recovery lookup failed for %s\n' "$alert_repo"
+        return 0
+    fi
+
+    if [[ -n "$existing_issue" ]]; then
+        if ! gh issue close "$existing_issue" --repo "$alert_repo" \
+            --comment "Resolved: $provider ($reviewer) completed a clean poll with no active failures or authentication warnings." >/dev/null; then
+            printf 'pr-review-cron: health alert close failed for %s#%s\n' "$alert_repo" "$existing_issue"
+            return 0
+        fi
+    fi
+
+    rm -f -- "$last_alert_file"
+}
+
 prune_inactive_failures
 
 processed=0
 failed=0
 paused=0
+auth_alert=0
+declare -a alert_reasons=()
+declare -a alert_lines=()
+auth_pattern='Failed to authenticate|Failed to refresh token|sign-in can end|claude auth login|Please log out and sign in again|token expired|invalid_jwt'
+
 while IFS= read -r item; do
     [[ -n "$item" ]] || continue
     if [[ ! "$item" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+$ ]]; then
@@ -237,6 +364,8 @@ while IFS= read -r item; do
     if grep -Fq "ESCALATE: $item " "$error_file"; then
         printf '[%s] %s requires human review; autonomous follow-ups stopped\n' \
             "$(date --iso-8601=seconds)" "$item"
+        alert_reasons+=("watch-escalate:$item")
+        alert_lines+=("- Escalated from watcher follow-up limit: $item")
         commit_item_state "$item"
         continue
     fi
@@ -269,16 +398,27 @@ while IFS= read -r item; do
         "" \
         "Use the GitHub CLI for GitHub reads and the final review submission. Inspect the complete diff, repository instructions, prior review conversation, and relevant surrounding code. Run proportionate tests when feasible. Re-read the pull request head immediately before submitting so no stale review is posted." \
         "" \
+        "Before choosing a verdict, perform a separate defect-seeking pass independent of the pull request description and existing CI results. Identify the highest-risk changed behavior, trace its failure and boundary paths, and inspect whether tests could pass while documented behavior still fails. Findings must be concrete and evidence-backed; do not manufacture nits. Treat APPROVE as a conclusion reached only after this pass, not as the default outcome." \
+        "" \
         "Submit exactly one new GitHub pull-request review at the current head using APPROVE, COMMENT, or REQUEST_CHANGES as warranted. Do not merely print a review locally. End the review body with this marker on its own line:" \
         "_reviewed from: $provider-wsl-cron_" \
         "" \
         "Do not merge, push commits, modify any branch, mark drafts ready, or approve a self-authored pull request. Keep temporary work under /tmp or $work_root. If a safe review cannot be completed, exit nonzero and explain why instead of submitting a guess.")"
 
     printf '[%s] reviewing %s at %s\n' "$(date --iso-8601=seconds)" "$item" "$current_head"
+    : >"$provider_out"
     set +e
-    (cd -- "$work_root" && run_provider "$prompt")
+    (cd -- "$work_root" && run_provider "$prompt") >"$provider_out" 2>&1
     provider_status=$?
     set -e
+    cat -- "$provider_out"
+
+    if grep -Eiq "$auth_pattern" "$provider_out"; then
+        auth_alert=1
+        auth_line=$(grep -Eim 1 "$auth_pattern" "$provider_out" | cut -c 1-200)
+        alert_reasons+=("auth:$provider")
+        alert_lines+=("- Authentication diagnostic for \`$provider\`: \`$auth_line\`")
+    fi
 
     set +e
     after_head=$(gh pr view "$number" --repo "$repo" --json headRefOid --jq '.headRefOid')
@@ -311,9 +451,19 @@ while IFS= read -r item; do
             commit_item_state "$item"
             printf 'pr-review-cron: ESCALATE: %s failed %s consecutive attempt(s) at %s; automatic retries paused\n' \
                 "$item" "$attempt_count" "$current_head"
+            alert_reasons+=("escalate:$item@$current_head")
+            alert_lines+=("- Review paused after $attempt_count failure(s): $item at \`$current_head\`")
         fi
     fi
 done <"$work_file"
+
+if (( ${#alert_reasons[@]} > 0 )); then
+    alert_fingerprint=$(printf '%s\n' "${alert_reasons[@]}" | LC_ALL=C sort -u | paste -sd ',' -)
+    alert_summary=$(printf '%s\n' "${alert_lines[@]}" | awk '!seen[$0]++')
+    emit_health_alert "$alert_fingerprint" "$alert_summary"
+elif (( failed == 0 && paused == 0 && auth_alert == 0 )); then
+    resolve_health_alert
+fi
 
 printf '[%s] %s watcher finished: %s confirmed, %s failed, %s paused\n' \
     "$(date --iso-8601=seconds)" "$provider" "$processed" "$failed" "$paused"

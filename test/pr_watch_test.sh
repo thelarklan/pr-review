@@ -88,9 +88,6 @@ esac
 EOF
 chmod +x "$test_dir/bin/gh"
 
-# shellcheck source=bashrc.d/git.sh
-source "$project_dir/bashrc.d/git.sh"
-
 run_watch() {
     local scenario="$1" state_file="$2"
     shift 2
@@ -98,14 +95,13 @@ run_watch() {
     : >"$test_dir/stderr"
     : >"$test_dir/gh-calls"
     set +e
-    # shellcheck disable=SC2016 # The child shell expands $1 after env starts it.
     env PATH="$test_dir/bin:$PATH" \
         GH_CALL_LOG="$test_dir/gh-calls" \
         GH_SCENARIO="$scenario" \
         GH_EVENT_ID="${GH_EVENT_ID:-}" \
         GH_EVENT_TIME="${GH_EVENT_TIME:-}" \
-        DEV_TOOLS_PR_WATCH_STATE="$state_file" \
-        "$@" /bin/bash -c 'source "$1"; pr-watch' _ "$project_dir/bashrc.d/git.sh" \
+        PR_WATCH_STATE="$state_file" \
+        "$@" "$project_dir/bin/pr-watch" \
         >"$test_dir/stdout" 2>"$test_dir/stderr"
     watch_status=$?
     set -e
@@ -128,7 +124,16 @@ grep -Fq 'another watcher is using' "$test_dir/stderr" || \
     fail "concurrent watcher failure was not explained"
 exec {held_lock_fd}>&-
 
-run_watch quiet "$test_dir/missing-flock.state" PATH="$test_dir/bin"
+# pr-watch is a standalone script, so it needs bash and core tools on PATH.
+# Link those tools into a separate directory and leave out flock.
+no_flock_bin="$test_dir/no-flock-bin"
+mkdir -p "$no_flock_bin"
+for tool in bash env cat cut date dirname grep jq mkdir mktemp mv rm sed sort touch tr; do
+    if tool_path=$(type -P "$tool"); then
+        ln -sf "$tool_path" "$no_flock_bin/$tool"
+    fi
+done
+run_watch quiet "$test_dir/missing-flock.state" PATH="$test_dir/bin:$no_flock_bin"
 [[ "$watch_status" -ne 0 ]] || fail "watcher without flock succeeded"
 grep -Fq 'flock is not installed' "$test_dir/stderr" || \
     fail "missing flock was reported as a lock collision"

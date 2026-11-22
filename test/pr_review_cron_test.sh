@@ -5,17 +5,16 @@ project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 test_dir=$(mktemp -d)
 trap 'rm -rf "$test_dir"' EXIT
 
-# Scheduled providers export their own PR_REVIEW_* settings. None of those
-# ambient values should change this test's fake identities, models, or drivers.
 unset PR_REVIEW_PROVIDER PR_REVIEW_OWNER PR_REVIEW_REVIEWER \
     PR_REVIEW_MAX_FOLLOWUPS PR_REVIEW_MAX_FAILURES PR_REVIEW_TIMEOUT \
     PR_REVIEW_WORK_ROOT PR_REVIEW_PATH PR_REVIEW_GEMINI_DRIVER \
     PR_REVIEW_CODEX_MODEL PR_REVIEW_CODEX_EFFORT PR_REVIEW_CLAUDE_MODEL \
     PR_REVIEW_CLAUDE_EFFORT PR_REVIEW_ANTIGRAVITY_MODEL \
     PR_REVIEW_ANTIGRAVITY_EFFORT PR_REVIEW_CODEX_BIN PR_REVIEW_CLAUDE_BIN \
-    PR_REVIEW_GEMINI_BIN PR_WATCH_OWNER PR_WATCH_REVIEWER \
-    PR_WATCH_MAX_FOLLOWUPS PR_WATCH_VERBOSE DEV_TOOLS_HELPER \
-    XDG_STATE_HOME XDG_CACHE_HOME
+    PR_REVIEW_GEMINI_BIN PR_REVIEW_WATCH_BIN PR_REVIEW_PROVIDER_ENV_FILE \
+    PR_REVIEW_ALERT_REPO PR_WATCH_OWNER PR_WATCH_REVIEWER \
+    PR_WATCH_MAX_FOLLOWUPS PR_WATCH_VERBOSE PR_WATCH_STATE \
+    DEV_TOOLS_PR_WATCH_STATE XDG_STATE_HOME XDG_CACHE_HOME
 
 fail() {
     printf 'FAIL: %s\n' "$*" >&2
@@ -31,32 +30,29 @@ assert_arg_pair() {
     ' "$args_file" || fail "$message"
 }
 
+assert_no_arg() {
+    local args_file="$1" flag="$2" message="$3"
+    if grep -Fqx -- "$flag" "$args_file"; then
+        fail "$message"
+    fi
+}
+
 home_dir="$test_dir/home"
 fake_bin="$home_dir/.local/bin"
-mkdir -p "$home_dir/.bashrc.d" "$fake_bin"
+mkdir -p "$fake_bin"
 
-for provider in codex claude gemini; do
-    template="$project_dir/cron/${provider}.crontab"
-    grep -Fq 'PR_REVIEW_REVIEWER=CHANGE_ME' "$template" || \
-        fail "$(basename "$template") does not require an explicit reviewer"
-    grep -Fq 'PR_REVIEW_PATH=CHANGE_ME' "$template" || \
-        fail "$(basename "$template") does not require an explicit provider PATH"
-done
-grep -Fq 'PR_REVIEW_CODEX_MODEL=gpt-5.6-sol PR_REVIEW_CODEX_EFFORT=high' \
-    "$project_dir/cron/codex.crontab" || fail "Codex crontab does not pin its model"
-grep -Fq 'PR_REVIEW_CLAUDE_MODEL=claude-sonnet-5 PR_REVIEW_CLAUDE_EFFORT=high' \
-    "$project_dir/cron/claude.crontab" || fail "Claude crontab does not pin its model"
-grep -Fq 'PR_REVIEW_ANTIGRAVITY_MODEL=gemini-3.7-flash-high PR_REVIEW_ANTIGRAVITY_EFFORT=high' \
-    "$project_dir/cron/gemini.crontab" || fail "Antigravity crontab does not pin its model"
-
-cat >"$home_dir/.bashrc.d/dev-tools-git.sh" <<'EOF'
-pr-watch() {
-    if [[ "${PR_WATCH_RECORD_STATE:-1}" == "1" ]]; then
-        printf '%s conversation head thread 42\n' "$PR_WATCH_ITEM" >>"$DEV_TOOLS_PR_WATCH_STATE"
-    fi
+cat >"$fake_bin/pr-watch" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+state_target="${PR_WATCH_STATE:-$DEV_TOOLS_PR_WATCH_STATE}"
+if [[ "${PR_WATCH_RECORD_STATE:-1}" == "1" ]]; then
+    printf '%s conversation head thread 42\n' "$PR_WATCH_ITEM" >>"$state_target"
+fi
+if [[ -n "${PR_WATCH_ITEM:-}" ]]; then
     printf '%s\n' "$PR_WATCH_ITEM"
-}
+fi
 EOF
+chmod +x "$fake_bin/pr-watch"
 
 cat >"$fake_bin/gh" <<'EOF'
 #!/usr/bin/env bash
@@ -85,6 +81,44 @@ elif [[ "$1" == "pr" && "$2" == "view" ]]; then
         fi
     fi
     printf 'head-sha\n'
+elif [[ "$1" == "issue" && "$2" == "list" ]]; then
+    if [[ -n "${ALERT_LOG:-}" ]]; then
+        printf 'list:%s\n' "$*" >>"$ALERT_LOG"
+    fi
+    if [[ -f "${OPEN_ALERT_ISSUE_FILE:-}" ]]; then
+        cat "${OPEN_ALERT_ISSUE_FILE}"
+    else
+        printf '[]\n'
+    fi
+elif [[ "$1" == "issue" && "$2" == "create" ]]; then
+    if [[ -n "${ALERT_LOG:-}" ]]; then
+        printf 'create:%s\n' "$*" >>"$ALERT_LOG"
+    fi
+    if [[ -n "${OPEN_ALERT_ISSUE_FILE:-}" ]]; then
+        shift 2
+        title=""
+        while (($# > 0)); do
+            if [[ "$1" == "--title" ]]; then
+                title="$2"
+                shift 2
+            else
+                shift
+            fi
+        done
+        jq -cn --arg title "$title" '[{number:77,title:$title}]' >"$OPEN_ALERT_ISSUE_FILE"
+    fi
+    printf 'https://github.com/owner/pr-review/issues/77\n'
+elif [[ "$1" == "issue" && "$2" == "comment" ]]; then
+    if [[ -n "${ALERT_LOG:-}" ]]; then
+        printf 'comment:%s\n' "$*" >>"$ALERT_LOG"
+    fi
+elif [[ "$1" == "issue" && "$2" == "close" ]]; then
+    if [[ -n "${ALERT_LOG:-}" ]]; then
+        printf 'close:%s\n' "$*" >>"$ALERT_LOG"
+    fi
+    if [[ -n "${OPEN_ALERT_ISSUE_FILE:-}" ]]; then
+        printf '[]\n' >"$OPEN_ALERT_ISSUE_FILE"
+    fi
 else
     printf 'unexpected gh call: %s\n' "$*" >&2
     exit 1
@@ -120,6 +154,7 @@ HOME="$home_dir" \
 PATH="$fake_bin:/usr/local/bin:/usr/bin:/bin" \
 PR_REVIEW_PROVIDER=codex \
 PR_REVIEW_PATH="$fake_bin:$toolchain_bin:/usr/local/bin:/usr/bin:/bin" \
+PR_REVIEW_WATCH_BIN="$fake_bin/pr-watch" \
 PR_REVIEW_CODEX_BIN="$fake_bin/codex" \
 PR_REVIEW_TIMEOUT=5s \
 PR_WATCH_ITEM=owner/repository#7 \
@@ -132,31 +167,67 @@ grep -Fqx 'owner/repository#7 conversation head thread 42' \
     "$home_dir/.local/state/pr-review/pr-watch.seen" || fail "confirmed watcher state was not committed"
 grep -Fq 'confirmed review 102 for owner/repository#7 at head-sha' \
     "$home_dir/.local/state/pr-review/cron.log" || fail "review was not confirmed in the log"
-assert_arg_pair "$provider_args" --model gpt-5.6-sol "Codex model was not pinned"
+assert_arg_pair "$provider_args" --model gpt-6.2-sol "Codex model was not pinned to gpt-6.2-sol"
 assert_arg_pair "$provider_args" --config 'model_reasoning_effort="high"' \
     "Codex reasoning effort was not pinned"
+grep -Fq 'perform a separate defect-seeking pass' "$provider_args" || \
+    fail "review prompt does not require a defect-seeking pass"
+grep -Fq 'tests could pass while documented behavior still fails' "$provider_args" || \
+    fail "review prompt does not require test-gap analysis"
+grep -Fq 'do not manufacture nits' "$provider_args" || \
+    fail "review prompt does not reject quota-driven findings"
+grep -Fq 'not as the default outcome' "$provider_args" || \
+    fail "review prompt does not set the approval threshold"
 
 cat >"$fake_bin/claude" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$@" >"$PROVIDER_ARGS"
+if [[ -n "${TOKEN_CAPTURE:-}" ]]; then
+    printf '%s\n' "${CLAUDE_CODE_OAUTH_TOKEN:-}" >"$TOKEN_CAPTURE"
+fi
 touch "$REVIEW_SUBMITTED"
 printf 'submitted test review\n'
 EOF
 chmod +x "$fake_bin/claude"
 
+broad_env="$test_dir/broad.env"
+printf 'CLAUDE_CODE_OAUTH_TOKEN=test-secret\n' >"$broad_env"
+chmod 644 "$broad_env"
+if HOME="$home_dir" \
+    PR_REVIEW_PROVIDER=claude \
+    PR_REVIEW_PROVIDER_ENV_FILE="$broad_env" \
+    "$project_dir/bin/pr-review-cron" 2>"$test_dir/broad-env-error"; then
+    fail "broad provider env permissions were accepted"
+fi
+grep -Fq 'provider env permissions are too broad' "$test_dir/broad-env-error" || \
+    fail "broad provider env permissions were not diagnosed"
+
+secret_env="$test_dir/provider.env"
+printf 'CLAUDE_CODE_OAUTH_TOKEN=secret-oauth-value\n' >"$secret_env"
+chmod 600 "$secret_env"
+token_capture="$test_dir/token-capture"
+
 rm -- "$review_marker"
 HOME="$home_dir" \
 PATH="$fake_bin:/usr/local/bin:/usr/bin:/bin" \
 PR_REVIEW_PROVIDER=claude \
+PR_REVIEW_WATCH_BIN="$fake_bin/pr-watch" \
+PR_REVIEW_PROVIDER_ENV_FILE="$secret_env" \
 PR_REVIEW_CLAUDE_BIN="$fake_bin/claude" \
 PR_REVIEW_TIMEOUT=5s \
 PR_WATCH_ITEM=owner/claude#8 \
 REVIEW_SUBMITTED="$review_marker" \
 PROVIDER_ARGS="$provider_args" \
+TOKEN_CAPTURE="$token_capture" \
     "$project_dir/bin/pr-review-cron"
-assert_arg_pair "$provider_args" --model claude-sonnet-5 "Claude model was not pinned"
+assert_arg_pair "$provider_args" --model claude-opus-5-5 "Claude model was not pinned to claude-opus-5-5"
 assert_arg_pair "$provider_args" --effort high "Claude effort was not pinned"
+[[ "$(cat "$token_capture")" == "secret-oauth-value" ]] || \
+    fail "provider env file did not supply CLAUDE_CODE_OAUTH_TOKEN"
+if grep -Fq 'secret-oauth-value' "$home_dir/.local/state/pr-review/cron.log"; then
+    fail "provider env secret leaked into cron.log"
+fi
 
 cat >"$fake_bin/agy" <<'EOF'
 #!/usr/bin/env bash
@@ -171,16 +242,33 @@ rm -- "$review_marker"
 HOME="$home_dir" \
 PATH="$fake_bin:/usr/local/bin:/usr/bin:/bin" \
 PR_REVIEW_PROVIDER=gemini \
-PR_REVIEW_GEMINI_DRIVER=agy \
+PR_REVIEW_WATCH_BIN="$fake_bin/pr-watch" \
 PR_REVIEW_GEMINI_BIN="$fake_bin/agy" \
 PR_REVIEW_TIMEOUT=5s \
 PR_WATCH_ITEM=owner/gemini#9 \
 REVIEW_SUBMITTED="$review_marker" \
 PROVIDER_ARGS="$provider_args" \
     "$project_dir/bin/pr-review-cron"
-assert_arg_pair "$provider_args" --model gemini-3.7-flash-high \
-    "Antigravity model was not pinned"
-assert_arg_pair "$provider_args" --effort high "Antigravity effort was not pinned"
+assert_arg_pair "$provider_args" --model gemini-4-neon-high \
+    "Antigravity model did not default to gemini-4-neon-high"
+assert_no_arg "$provider_args" --effort \
+    "Antigravity passed --effort when PR_REVIEW_ANTIGRAVITY_EFFORT was empty"
+
+rm -- "$review_marker"
+HOME="$home_dir" \
+PATH="$fake_bin:/usr/local/bin:/usr/bin:/bin" \
+PR_REVIEW_PROVIDER=gemini \
+PR_REVIEW_GEMINI_DRIVER=agy \
+PR_REVIEW_ANTIGRAVITY_EFFORT=high \
+PR_REVIEW_WATCH_BIN="$fake_bin/pr-watch" \
+PR_REVIEW_GEMINI_BIN="$fake_bin/agy" \
+PR_REVIEW_TIMEOUT=5s \
+PR_WATCH_ITEM=owner/gemini#9 \
+REVIEW_SUBMITTED="$review_marker" \
+PROVIDER_ARGS="$provider_args" \
+    "$project_dir/bin/pr-review-cron"
+assert_arg_pair "$provider_args" --effort high \
+    "Antigravity did not pass explicit PR_REVIEW_ANTIGRAVITY_EFFORT"
 
 rm -- "$review_marker"
 batch_calls="$test_dir/batch-provider-calls"
@@ -188,6 +276,7 @@ batch_items=$'owner/first#10\nowner/fail#11\nowner/third#12'
 if HOME="$home_dir" \
     PATH="$fake_bin:$toolchain_bin:/usr/local/bin:/usr/bin:/bin" \
     PR_REVIEW_PROVIDER=codex \
+    PR_REVIEW_WATCH_BIN="$fake_bin/pr-watch" \
     PR_REVIEW_CODEX_BIN="$fake_bin/codex" \
     PR_REVIEW_TIMEOUT=5s \
     PR_WATCH_ITEM="$batch_items" \
@@ -212,6 +301,7 @@ head_calls="$test_dir/head-calls"
 if HOME="$home_dir" \
     PATH="$fake_bin:$toolchain_bin:/usr/local/bin:/usr/bin:/bin" \
     PR_REVIEW_PROVIDER=codex \
+    PR_REVIEW_WATCH_BIN="$fake_bin/pr-watch" \
     PR_REVIEW_CODEX_BIN="$fake_bin/codex" \
     PR_REVIEW_TIMEOUT=5s \
     PR_WATCH_ITEM=owner/confirmation#10 \
@@ -228,11 +318,17 @@ grep -Fq 'confirmation query failed for owner/confirmation#10' \
 
 rm -- "$review_marker"
 failure_calls="$test_dir/failure-calls"
+alert_log="$test_dir/alert.log"
+open_alert_file="$test_dir/open-alert.json"
+: >"$alert_log"
+printf '[]\n' >"$open_alert_file"
+
 cat >"$fake_bin/codex" <<'EOF'
 #!/usr/bin/env bash
 count=0
 [[ ! -e "$PROVIDER_CALLS" ]] || read -r count <"$PROVIDER_CALLS"
 printf '%s\n' "$((count + 1))" >"$PROVIDER_CALLS"
+printf 'ERROR: Your access token could not be refreshed. Please log out and sign in again.\n'
 exit 1
 EOF
 chmod +x "$fake_bin/codex"
@@ -241,8 +337,12 @@ for attempt in 1 2; do
     if HOME="$home_dir" \
         PATH="$fake_bin:/usr/local/bin:/usr/bin:/bin" \
         PR_REVIEW_PROVIDER=codex \
+        PR_REVIEW_WATCH_BIN="$fake_bin/pr-watch" \
         PR_REVIEW_CODEX_BIN="$fake_bin/codex" \
         PR_REVIEW_MAX_FAILURES=2 \
+        PR_REVIEW_ALERT_REPO=owner/pr-review \
+        ALERT_LOG="$alert_log" \
+        OPEN_ALERT_ISSUE_FILE="$open_alert_file" \
         PR_REVIEW_TIMEOUT=5s \
         PR_WATCH_ITEM=owner/another#8 \
         PR_WATCH_RECORD_STATE=0 \
@@ -252,11 +352,20 @@ for attempt in 1 2; do
         fail "unconfirmed provider run $attempt succeeded"
     fi
 done
+[[ "$(grep -Fc 'create:' "$alert_log")" == 1 ]] || \
+    fail "auth failure did not create exactly one health alert issue"
+[[ "$(grep -Fc 'comment:' "$alert_log")" == 1 ]] || \
+    fail "escalation change did not update the existing health alert issue"
+
 HOME="$home_dir" \
 PATH="$fake_bin:/usr/local/bin:/usr/bin:/bin" \
 PR_REVIEW_PROVIDER=codex \
+PR_REVIEW_WATCH_BIN="$fake_bin/pr-watch" \
 PR_REVIEW_CODEX_BIN="$fake_bin/codex" \
 PR_REVIEW_MAX_FAILURES=2 \
+PR_REVIEW_ALERT_REPO=owner/pr-review \
+ALERT_LOG="$alert_log" \
+OPEN_ALERT_ISSUE_FILE="$open_alert_file" \
 PR_REVIEW_TIMEOUT=5s \
 PR_WATCH_ITEM=owner/another#8 \
 PR_WATCH_RECORD_STATE=0 \
@@ -264,6 +373,8 @@ REVIEW_SUBMITTED="$review_marker" \
 PROVIDER_CALLS="$failure_calls" \
     "$project_dir/bin/pr-review-cron"
 [[ "$(cat "$failure_calls")" == "2" ]] || fail "provider retries were not bounded"
+[[ "$(grep -Fc 'close:' "$alert_log")" == 0 ]] || \
+    fail "health alert issue closed while paused PRs remained"
 grep -Fq 'ESCALATE: owner/another#8 failed 2 consecutive attempt(s)' \
     "$home_dir/.local/state/pr-review/cron.log" || fail "provider failures did not escalate"
 grep -Fq 'owner/another#8 at head-sha remains paused after 2 unconfirmed attempt(s)' \
@@ -275,6 +386,24 @@ if grep -Eq 'owner/(confirmation#10|third#12) ' \
     "$home_dir/.local/state/pr-review/provider-failures"; then
     fail "inactive provider failure state was not pruned"
 fi
+
+HOME="$home_dir" \
+PATH="$fake_bin:/usr/local/bin:/usr/bin:/bin" \
+PR_REVIEW_PROVIDER=codex \
+PR_REVIEW_WATCH_BIN="$fake_bin/pr-watch" \
+PR_REVIEW_CODEX_BIN="$fake_bin/codex" \
+PR_REVIEW_ALERT_REPO=owner/pr-review \
+ALERT_LOG="$alert_log" \
+OPEN_ALERT_ISSUE_FILE="$open_alert_file" \
+PR_REVIEW_TIMEOUT=5s \
+PR_WATCH_ITEM='' \
+PR_WATCH_RECORD_STATE=0 \
+REVIEW_SUBMITTED="$review_marker" \
+    "$project_dir/bin/pr-review-cron"
+[[ "$(grep -Fc 'close:' "$alert_log")" == 1 ]] || \
+    fail "clean recovery run did not close the open health alert issue"
+[[ ! -e "$home_dir/.local/state/pr-review/last-alert-key" ]] || \
+    fail "last-alert-key remained after closing the health alert issue"
 
 if HOME="$home_dir" PR_REVIEW_PROVIDER=codex PR_REVIEW_PATH=CHANGE_ME \
     "$project_dir/bin/pr-review-cron" 2>/dev/null; then
