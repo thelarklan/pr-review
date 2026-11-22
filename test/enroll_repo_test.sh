@@ -45,7 +45,7 @@ case "$*" in
     "api repos/thelarklanlabs/example --jq .visibility")
         printf '%s\n' "$FAKE_VISIBILITY"
         ;;
-    "api repos/thelarklanlabs/example/rulesets --jq "*)
+    "api --paginate repos/thelarklanlabs/example/rulesets?includes_parents=false --jq "*)
         if [[ -n "${FAKE_EXISTING_ID:-}" ]]; then
             printf '%s\n' "$FAKE_EXISTING_ID"
         fi
@@ -103,6 +103,10 @@ checks=$(jq -c '[.rules[] | select(.type == "required_status_checks") | .paramet
     fail "ruleset must require 3 approvals"
 [[ "$(jq '.bypass_actors | length' "$test_dir/payload.json")" == 0 ]] ||
     fail "ruleset must have no bypass actors"
+
+# The lookup reads every page and leaves out inherited rulesets.
+grep -Fq 'api --paginate repos/thelarklanlabs/example/rulesets?includes_parents=false --jq' "$test_dir/calls" ||
+    fail "ruleset lookup does not paginate or still includes parent rulesets"
 
 # Existing ruleset: update it in place.
 run_enroll FAKE_VISIBILITY=public FAKE_EXISTING_ID=55 "$enroll" thelarklanlabs/example \

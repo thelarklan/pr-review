@@ -91,6 +91,13 @@ for expected in QUORUM_APP_ID=12345 QUORUM_INSTALLATION_ID=222 QUORUM_OWNER_ID=1
     QUORUM_REPOSITORY_OWNER_IDS=323226749 QUORUM_BOT_IDS=270192887,104110997,320627233; do
     grep -Fxq "$expected" "$env_file" || fail "config is missing $expected"
 done
+# Relative key and policy paths are stored as absolute paths.
+cp "$real_key" "$test_dir/relative.pem"
+cp "$config_dir/repo-policy.json" "$test_dir/relative-policy.json"
+(cd "$test_dir" && run_app config --org thelarklanlabs --app-id 12345 --installation-id 222 \
+    --key ./relative.pem --policy ./relative-policy.json --repository-owner-ids 323226749 >/dev/null)
+grep -Fxq "QUORUM_PRIVATE_KEY_FILE=\"$test_dir/relative.pem\"" "$env_file" || fail "relative key path was not resolved"
+grep -Fxq "QUORUM_REPO_POLICY_FILE=\"$test_dir/relative-policy.json\"" "$env_file" || fail "relative policy path was not resolved"
 if grep -q "^QUORUM_LOG_UNCHANGED=" "$env_file"; then
     fail "config pins QUORUM_LOG_UNCHANGED, which overrides the audit flag"
 fi

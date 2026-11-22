@@ -123,7 +123,8 @@ existing='null'
 kept_json='[]'
 ruleset_file=""
 if [[ "$visibility" == public ]]; then
-    existing_id=$(gh api "repos/$repo/rulesets" \
+    # Read every page, and leave out rulesets inherited from the organization.
+    existing_id=$(gh api --paginate "repos/$repo/rulesets?includes_parents=false" \
         --jq '.[] | select(.source_type == "Repository" and .name == "main protection") | .id' | head -n 1) ||
         fail "cannot list the rulesets of $repo"
 fi

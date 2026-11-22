@@ -158,6 +158,10 @@ cmd_config() {
     policy_file="${policy_file:-$config_dir/repo-policy.json}"
     [[ -f "$policy_file" ]] || fail "repository policy not found: $policy_file"
 
+    # Cron runs the evaluator from the home directory, so store absolute paths.
+    key=$(realpath -e -- "$key")
+    policy_file=$(realpath -e -- "$policy_file")
+
     install -d -m 700 "$config_dir"
     umask 077
     out="$config_dir/$org.env"
