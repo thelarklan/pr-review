@@ -62,6 +62,12 @@ failure_file="$state_dir/provider-failures"
 last_alert_file="$state_dir/last-alert-key"
 owner="${PR_REVIEW_OWNER:-${PR_WATCH_OWNER:-thelarklan}}"
 alert_repo="${PR_REVIEW_ALERT_REPO:-}"
+# From this review round on, a reviewer requests changes only for blocking defects.
+strict_round="${PR_REVIEW_STRICT_ROUND:-3}"
+if [[ ! "$strict_round" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'pr-review-cron: PR_REVIEW_STRICT_ROUND must be a positive whole number\n' >&2
+    exit 2
+fi
 
 mkdir -p -- "$state_dir" "$cache_dir" "$work_root"
 touch -- "$log_file" "$state_file" "$failure_file"
@@ -179,6 +185,19 @@ latest_review() {
     gh api --paginate "/repos/$repo/pulls/$number/reviews?per_page=100" \
         --jq ".[] | select(((.user.login // \"\") | ascii_downcase) == \"${reviewer,,}\" and (.state // \"\") != \"DISMISSED\") | [(.id | tostring), (.commit_id // \"\")] | @tsv" \
         | tail -n 1
+}
+
+# The review round is 1 + the number of earlier reviews by this reviewer on the pull request.
+# Dismissed reviews count too, because a push dismisses stale approvals.
+# If the count cannot be read, use round 1 (the normal review bar).
+review_round() {
+    local repo="$1" number="$2" ids
+    if ids=$(gh api --paginate "/repos/$repo/pulls/$number/reviews?per_page=100" \
+        --jq ".[] | select(((.user.login // \"\") | ascii_downcase) == \"${reviewer,,}\") | .id"); then
+        printf '%s\n' "$(($(grep -c . <<<"$ids" || true) + 1))"
+    else
+        printf '1\n'
+    fi
 }
 
 resolve_executable() {
@@ -393,12 +412,19 @@ while IFS= read -r item; do
         continue
     fi
     before_review_id="${before_review%%$'\t'*}"
+    round=$(review_round "$repo" "$number")
+    round_rule="This is your review round $round on this pull request."
+    if ((round >= strict_round)); then
+        round_rule+=" From round $strict_round on, use REQUEST_CHANGES only for a blocking defect: a wrong result, lost data, a security problem, or a change that breaks a running host or blocks merges. Put every other finding in the review body as a non-blocking suggestion, and submit APPROVE when no blocking defect remains."
+    fi
     prompt="$(printf '%s\n' \
         "This is an autonomous scheduled pull-request review for $item, running as GitHub identity $reviewer." \
         "" \
         "Use the GitHub CLI for GitHub reads and the final review submission. Inspect the complete diff, repository instructions, prior review conversation, and relevant surrounding code. Run proportionate tests when feasible. Re-read the pull request head immediately before submitting so no stale review is posted." \
         "" \
         "Before choosing a verdict, perform a separate defect-seeking pass independent of the pull request description and existing CI results. Identify the highest-risk changed behavior, trace its failure and boundary paths, and inspect whether tests could pass while documented behavior still fails. Findings must be concrete and evidence-backed; do not manufacture nits. Treat APPROVE as a conclusion reached only after this pass, not as the default outcome." \
+        "" \
+        "$round_rule" \
         "" \
         "Submit exactly one new GitHub pull-request review at the current head using APPROVE, COMMENT, or REQUEST_CHANGES as warranted. Do not merely print a review locally. End the review body with this marker on its own line:" \
         "_reviewed from: $provider-wsl-cron_" \

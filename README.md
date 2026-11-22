@@ -34,6 +34,8 @@ bash install.sh --role codex   # or claude, gemini, services
 ```
 
 Cron jobs execute directly from the clone instead of copying binaries to `~/.local/bin`.
+Each bot reviewer runs each minute. Its lock skips a run while the previous review is still going.
+From its third review of a pull request (`PR_REVIEW_STRICT_ROUND`, default `3`), a bot requests changes only for a blocking defect.
 All roles run `bin/pr-review-update` hourly at minute `19` (`19 * * * *`).
 The updater shares the review lock and waits up to 50 minutes for a running review to finish.
 It verifies each new commit in a temporary export before it moves the live clone.
