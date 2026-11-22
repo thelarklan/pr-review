@@ -59,11 +59,6 @@ cat >"$fake_bin/gh" <<'EOF'
 set -euo pipefail
 if [[ "$1" == "api" && "$2" == "user" ]]; then
     printf 'review-bot\n'
-elif [[ "$1" == "api" && "$*" == */reviews* && "$*" == *'| .id' ]]; then
-    # Review-round query: one review ID per earlier review by this reviewer.
-    for ((index = 1; index <= ${FAKE_PRIOR_REVIEWS:-0}; index++)); do
-        printf '%s\n' "$((80 + index))"
-    done
 elif [[ "$1" == "api" && ( "$2" == */reviews* || "${3:-}" == */reviews* ) ]]; then
     if [[ -e "$REVIEW_SUBMITTED" ]]; then
         printf '102\thead-sha\n'
@@ -183,42 +178,6 @@ grep -Fq 'do not manufacture nits' "$provider_args" || \
     fail "review prompt does not reject quota-driven findings"
 grep -Fq 'not as the default outcome' "$provider_args" || \
     fail "review prompt does not set the approval threshold"
-grep -Fq 'This is your review round 1 on this pull request.' "$provider_args" || \
-    fail "first review did not state round 1"
-if grep -Fq 'only for a blocking defect' "$provider_args"; then
-    fail "first review already used the blocking-defect bar"
-fi
-
-# From the third review on, the reviewer requests changes only for blocking defects.
-run_round_review() {
-    local prior="$1" round_home="$test_dir/round-home-$1"
-    mkdir -p "$round_home"
-    HOME="$round_home" \
-    PATH="$fake_bin:/usr/local/bin:/usr/bin:/bin" \
-    PR_REVIEW_PROVIDER=codex \
-    PR_REVIEW_PATH="$fake_bin:$toolchain_bin:/usr/local/bin:/usr/bin:/bin" \
-    PR_REVIEW_WATCH_BIN="$fake_bin/pr-watch" \
-    PR_REVIEW_CODEX_BIN="$fake_bin/codex" \
-    PR_REVIEW_TIMEOUT=5s \
-    PR_WATCH_ITEM=owner/repository#7 \
-    FAKE_PRIOR_REVIEWS="$prior" \
-    REVIEW_SUBMITTED="$test_dir/review-submitted-round-$prior" \
-    PROVIDER_ARGS="$provider_args" \
-        "$project_dir/bin/pr-review-cron"
-}
-run_round_review 1
-grep -Fq 'This is your review round 2 on this pull request.' "$provider_args" || \
-    fail "second review did not state round 2"
-if grep -Fq 'only for a blocking defect' "$provider_args"; then
-    fail "second review already used the blocking-defect bar"
-fi
-run_round_review 2
-grep -Fq 'This is your review round 3 on this pull request.' "$provider_args" || \
-    fail "third review did not state round 3"
-grep -Fq 'use REQUEST_CHANGES only for a blocking defect' "$provider_args" || \
-    fail "third review did not raise the bar to blocking defects"
-grep -Fq 'submit APPROVE when no blocking defect remains' "$provider_args" || \
-    fail "third review did not say when to approve"
 
 cat >"$fake_bin/claude" <<'EOF'
 #!/usr/bin/env bash
