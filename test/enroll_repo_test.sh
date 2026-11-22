@@ -32,10 +32,15 @@ case "$*" in
         printf '%s\n' "${FAKE_OWNER_TYPE:-Organization}"
         ;;
     "api orgs/thelarklanlabs/installations --jq "*)
-        # The real call filters by app_id with jq. Here App 999 is the installed one.
-        if [[ "$*" == *"app_id == 999)"* ]]; then
-            printf '%s\n' "${FAKE_SELECTION:-all}"
-        fi
+        # Apply the real --jq filter of the script to realistic installation data.
+        jq_filter=""
+        previous=""
+        for argument in "$@"; do
+            [[ "$previous" == --jq ]] && jq_filter="$argument"
+            previous="$argument"
+        done
+        default_installations='{"installations":[{"app_id":999,"repository_selection":"all","suspended_at":null,"permissions":{"checks":"write","metadata":"read","pull_requests":"write"}}]}'
+        printf '%s\n' "${FAKE_INSTALLATIONS:-$default_installations}" | jq -r "$jq_filter"
         ;;
     "api repos/thelarklanlabs/example --jq .visibility")
         printf '%s\n' "$FAKE_VISIBILITY"
@@ -192,8 +197,20 @@ assert_refused_without_writes() {
 assert_refused_without_writes "App not installed on the owner was accepted" \
     "$enroll" thelarklanlabs/example --app-id 4752010
 grep -Fq 'App 4752010 is not installed on thelarklanlabs' "$test_dir/err" || fail "missing installation was not explained"
+installation_json() {
+    local selection="$1" suspended_at="$2" checks="$3"
+    jq -cn --arg selection "$selection" --argjson suspended_at "$suspended_at" --arg checks "$checks" \
+        '{installations: [{app_id: 999, repository_selection: $selection, suspended_at: $suspended_at,
+          permissions: {checks: $checks, metadata: "read"}}]}'
+}
 assert_refused_without_writes "App with selected repositories was accepted without confirmation" \
-    FAKE_SELECTION=selected "$enroll" thelarklanlabs/example --app-id 999
+    FAKE_INSTALLATIONS="$(installation_json selected null write)" "$enroll" thelarklanlabs/example --app-id 999
+assert_refused_without_writes "suspended App installation was accepted" \
+    FAKE_INSTALLATIONS="$(installation_json all '"2026-11-22T10:00:00Z"' write)" "$enroll" thelarklanlabs/example --app-id 999
+grep -Fq 'is suspended on thelarklanlabs' "$test_dir/err" || fail "suspension was not explained"
+assert_refused_without_writes "App installation without checks write was accepted" \
+    FAKE_INSTALLATIONS="$(installation_json all null read)" "$enroll" thelarklanlabs/example --app-id 999
+grep -Fq "has checks permission 'read'" "$test_dir/err" || fail "checks permission was not explained"
 assert_refused_without_writes "user-owned repository was accepted without confirmation" \
     FAKE_OWNER_TYPE=User "$enroll" thelarklanlabs/example --app-id 999
 grep -Fq -- '--skip-install-check' "$test_dir/err" || fail "user-owned refusal did not name the override"

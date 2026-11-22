@@ -93,11 +93,19 @@ if ((skip_install_check == 0)); then
     if [[ "$owner_type" != Organization ]]; then
         fail "cannot confirm App installations on user account $owner with a personal token. Confirm that App $app_id is installed for $repo, then run again with --skip-install-check."
     fi
-    selection=$(gh api "orgs/$owner/installations" \
-        --jq ".installations[] | select(.app_id == $app_id) | .repository_selection") ||
+    # Fields joined with "|" so that an empty field (for example suspended_at) keeps its place.
+    installation=$(gh api "orgs/$owner/installations" \
+        --jq ".installations[] | select(.app_id == $app_id) | [.repository_selection, (.suspended_at // \"\"), (.permissions.checks // \"\")] | join(\"|\")") ||
         fail "cannot list App installations on $owner"
-    if [[ -z "$selection" ]]; then
+    if [[ -z "$installation" ]]; then
         fail "App $app_id is not installed on $owner, so its check could never pass on $repo. Install the App or use the App of this owner."
+    fi
+    IFS='|' read -r selection suspended_at checks_permission <<<"$installation"
+    if [[ -n "$suspended_at" ]]; then
+        fail "App $app_id is suspended on $owner since $suspended_at, so its check could never pass on $repo. Unsuspend the installation first."
+    fi
+    if [[ "$checks_permission" != write ]]; then
+        fail "App $app_id has checks permission '${checks_permission:-none}' on $owner. It needs write to publish bot-review-quorum."
     fi
     if [[ "$selection" != all ]]; then
         fail "App $app_id is installed on $owner for selected repositories only. Confirm that it includes $repo, then run again with --skip-install-check."

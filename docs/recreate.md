@@ -105,9 +105,13 @@ Enroll only repositories that the organization owns.
 For a repository on another account, do section 4 first.
 Run this step with a `gh` login that is an owner of the organization.
 
+Set `APP_ID` to the App ID that `create-app.sh exchange` printed in section 1.
+For the App that runs now, the value is in the table above.
+
 ```bash
-scripts/enroll-repo.sh thelarklanlabs/pr-review --app-id 5877283 --check verify --dry-run
-scripts/enroll-repo.sh thelarklanlabs/pr-review --app-id 5877283 --check verify
+APP_ID=5877283   # replace with the ID from section 1 after a rebuild
+scripts/enroll-repo.sh thelarklanlabs/pr-review --app-id "$APP_ID" --check verify --dry-run
+scripts/enroll-repo.sh thelarklanlabs/pr-review --app-id "$APP_ID" --check verify
 ```
 
 - The script stops before any change if the App is not installed on the organization for all repositories.
