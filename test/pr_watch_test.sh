@@ -121,6 +121,17 @@ grep -Fq 'search prs --owner thelarklan --owner thelarklanlabs --state open' "$t
 run_watch new-head "$test_dir/bad-owner.state" 'PR_WATCH_OWNER=thelarklan;other'
 [[ "$watch_status" -eq 2 ]] || fail "invalid owner list was accepted"
 
+# Opt-in: with a label, the search returns only pull requests that carry it.
+if grep -Fq -- '--label' "$test_dir/gh-calls"; then
+    fail "search without PR_WATCH_LABEL used a label filter"
+fi
+run_watch new-head "$test_dir/label.state" PR_WATCH_LABEL=bot-review
+[[ "$watch_status" -eq 0 ]] || fail "labeled watch failed"
+grep -Fq 'search prs --owner thelarklan --label bot-review --state open' "$test_dir/gh-calls" ||
+    fail "opt-in label was not passed to the search"
+run_watch new-head "$test_dir/bad-label.state" 'PR_WATCH_LABEL=bot review'
+[[ "$watch_status" -eq 2 ]] || fail "invalid label was accepted"
+
 touch "$test_dir/persistent-lock.state.lock"
 run_watch new-head "$test_dir/persistent-lock.state"
 [[ "$watch_status" -eq 0 ]] || fail "an unlocked lock file wedged the watcher"

@@ -45,6 +45,13 @@ case "$*" in
     "api repos/thelarklanlabs/example --jq .visibility")
         printf '%s\n' "$FAKE_VISIBILITY"
         ;;
+    "api repos/thelarklanlabs/example/labels/bot-review --jq .name")
+        case "${FAKE_LABEL:-missing}" in
+            exists) printf 'bot-review\n' ;;
+            missing) printf 'gh: Not Found (HTTP 404)\n' >&2; exit 1 ;;
+            error) printf 'gh: Server Error (HTTP 500)\n' >&2; exit 1 ;;
+        esac
+        ;;
     "api --paginate repos/thelarklanlabs/example/rulesets?includes_parents=false --jq "*)
         if [[ -n "${FAKE_EXISTING_ID:-}" ]]; then
             printf '%s\n' "$FAKE_EXISTING_ID"
@@ -246,6 +253,19 @@ assert_refused_without_writes "ruleset with release branches was narrowed" \
 grep -Fq 'does not change branch coverage' "$test_dir/err" || fail "branch coverage refusal was not explained"
 assert_refused_without_writes "failed ruleset read still changed settings" \
     FAKE_EXISTING_ID=59 "$enroll" thelarklanlabs/example --app-id 999
+
+# The opt-in label is created once and reused after that.
+run_enroll FAKE_VISIBILITY=private FAKE_LABEL=missing "$enroll" thelarklanlabs/example --app-id 999 >"$test_dir/out" ||
+    fail "enrollment failed when the label was missing"
+grep -Fq 'api -X POST repos/thelarklanlabs/example/labels -f name=bot-review' "$test_dir/calls" ||
+    fail "missing opt-in label was not created"
+run_enroll FAKE_VISIBILITY=private FAKE_LABEL=exists "$enroll" thelarklanlabs/example --app-id 999 >"$test_dir/out" ||
+    fail "enrollment failed when the label existed"
+if grep -Fq 'repos/thelarklanlabs/example/labels -f' "$test_dir/calls"; then
+    fail "existing opt-in label was created again"
+fi
+assert_refused_without_writes "label read error was ignored" \
+    FAKE_LABEL=error "$enroll" thelarklanlabs/example --app-id 999
 
 # Invalid input.
 if run_enroll FAKE_VISIBILITY=public "$enroll" thelarklanlabs/example --app-id abc >/dev/null 2>&1; then

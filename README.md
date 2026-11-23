@@ -35,6 +35,11 @@ bash install.sh --role codex   # or claude, gemini, services
 
 Cron jobs execute directly from the clone instead of copying binaries to `~/.local/bin`.
 Each bot reviewer runs each minute. Its lock skips a run while the previous review is still going.
+
+Review is opt-in. The bots review only pull requests with the label `bot-review` (`PR_REVIEW_LABEL` in `hosts/*.env`).
+To request review, run `gh pr edit NUMBER --add-label bot-review`.
+Add the label when the pull request is ready, because each new commit after that starts a new review by each bot.
+On a repository with a ruleset, a pull request without the label stays blocked, because `bot-review-quorum` needs the approvals.
 All roles run `bin/pr-review-update` hourly at minute `19` (`19 * * * *`).
 The updater shares the review lock and waits up to 50 minutes for a running review to finish.
 It verifies each new commit in a temporary export before it moves the live clone.

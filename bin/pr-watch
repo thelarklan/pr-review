@@ -50,6 +50,16 @@ main() {
     for owner in "${owner_list[@]}"; do
         owner_args+=(--owner "$owner")
     done
+    # PR_WATCH_LABEL makes review opt-in: only pull requests with this label are watched.
+    # Empty means every open pull request of the owners.
+    local label="${PR_WATCH_LABEL:-}"
+    if [[ -n "$label" ]]; then
+        if [[ ! "$label" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            _pr_watch_error "PR_WATCH_LABEL must be one label name made of letters, digits, '.', '_', or '-'"
+            return 2
+        fi
+        owner_args+=(--label "$label")
+    fi
     if [[ "$verbose" != "0" && "$verbose" != "1" ]]; then
         _pr_watch_error "PR_WATCH_VERBOSE must be 0 or 1"
         return 2

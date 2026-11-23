@@ -46,6 +46,9 @@ assert_contains "$gemini_cron" '* * * * * /usr/bin/flock -n "$HOME/.cache/pr-rev
 assert_contains "$gemini_cron" 'PR_REVIEW_GEMINI_DRIVER=agy' "gemini driver mismatch"
 assert_contains "$gemini_cron" 'PR_REVIEW_ANTIGRAVITY_MODEL=gemini-4-neon-medium' "gemini model mismatch"
 assert_contains "$gemini_cron" 'PR_REVIEW_ANTIGRAVITY_EFFORT=""' "gemini effort should be empty"
+for cron in "$codex_cron" "$claude_cron" "$gemini_cron"; do
+    assert_contains "$cron" 'PR_REVIEW_LABEL=bot-review' "bot cron line is missing the opt-in label"
+done
 
 # services schedules only the quorum configs that exist.
 services_home="$test_dir/services-home"

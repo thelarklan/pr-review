@@ -61,6 +61,8 @@ state_file="$state_dir/pr-watch.seen"
 failure_file="$state_dir/provider-failures"
 last_alert_file="$state_dir/last-alert-key"
 owner="${PR_REVIEW_OWNER:-${PR_WATCH_OWNER:-thelarklan}}"
+# Opt-in label: when set, only pull requests with this label get an AI review.
+review_label="${PR_REVIEW_LABEL:-${PR_WATCH_LABEL:-}}"
 alert_repo="${PR_REVIEW_ALERT_REPO:-}"
 
 mkdir -p -- "$state_dir" "$cache_dir" "$work_root"
@@ -112,6 +114,7 @@ set +e
 PR_WATCH_STATE="$candidate_state" \
 DEV_TOOLS_PR_WATCH_STATE="$candidate_state" \
 PR_WATCH_OWNER="$owner" \
+PR_WATCH_LABEL="$review_label" \
 PR_WATCH_REVIEWER="$reviewer" \
 PR_WATCH_MAX_FOLLOWUPS="${PR_REVIEW_MAX_FOLLOWUPS:-2}" \
 PR_WATCH_VERBOSE=1 \
