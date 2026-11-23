@@ -3,9 +3,7 @@
 Use this runbook to rebuild the review system from nothing, or to move it to a new organization.
 Each step uses a file or a script in this repository.
 
-Until the transfer to `thelarklanlabs`, the repository is at `https://github.com/thelarklan/pr-review`.
-The `git clone` commands below use the target URL. Before the transfer, clone from `thelarklan/pr-review` instead.
-Do not change any other command. In particular, do not enroll a repository before it belongs to the organization.
+Do not enroll a repository before it belongs to the organization.
 
 ## Which App serves which owner
 

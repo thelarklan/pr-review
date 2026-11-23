@@ -27,7 +27,7 @@ The cohort contains four accounts: `thelarklan`, `larkbot-codex`, `larkbot-claud
 Clone this repository into `~/projects/repos/pr-review`, run verification, and install the role schedule:
 
 ```bash
-git clone https://github.com/thelarklan/pr-review.git ~/projects/repos/pr-review
+git clone https://github.com/thelarklanlabs/pr-review.git ~/projects/repos/pr-review
 cd ~/projects/repos/pr-review
 bash scripts/verify.sh
 bash install.sh --role codex   # or claude, gemini, services
@@ -53,7 +53,7 @@ A failed verification leaves the live clone and crontab unchanged.
 | `claude` | `claude` | `claude-opus-5-5` | `PR_REVIEW_CLAUDE_EFFORT=medium` |
 | `gemini` | `agy` | `gemini-4-neon-medium` | In the model name. `--effort` is omitted. |
 
-Set `PR_REVIEW_ALERT_REPO=thelarklan/pr-review` to open or update one health issue on escalations or auth failures.
+Set `PR_REVIEW_ALERT_REPO=thelarklanlabs/pr-review` to open or update one health issue on escalations or auth failures.
 Store optional unattended tokens (such as `CLAUDE_CODE_OAUTH_TOKEN`) in `~/.config/pr-review/provider.env` with mode `600`.
 
 ## Quorum deployment
