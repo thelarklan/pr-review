@@ -15,6 +15,12 @@ The `bot-review-quorum` check requires full 3-of-3 exact-head approval across `{
 - Pull requests from `thelarklan` need exact-head approvals from all three bots.
 - Pull requests from a bot need exact-head approvals from both other bots and `thelarklan`.
 
+## Request a review
+
+Review is opt-in to limit AI usage.
+When a pull request is ready, add the label: `gh pr edit NUMBER --repo OWNER/REPO --add-label bot-review`.
+Each new commit after that starts a new review by each of the three bots.
+
 ## Enroll a repository
 
 1. Use the App of the repository owner. See "Which App serves which owner" in `docs/recreate.md`.
@@ -28,7 +34,8 @@ The `bot-review-quorum` check requires full 3-of-3 exact-head approval across `{
    ```
 
 3. Run the same command without `--dry-run`.
-   The script sets squash merge only, gives the three bots write access, and writes the "main protection" ruleset.
+   The script sets squash merge only, gives the three bots write access, creates the `bot-review` label,
+   and writes the "main protection" ruleset.
 4. If a bot is not an organization member, accept its repository invitation on its WSL distribution.
 5. Keep `OWNER/REPO` out of `~/.config/pr-review/repo-policy.json` on `services` unless auto-merge is wanted.
 

@@ -129,6 +129,13 @@ if [[ "$visibility" == public ]]; then
         fail "cannot list the rulesets of $repo"
 fi
 
+# The opt-in label. The bots review only pull requests that carry it.
+review_label="bot-review"
+label_status=$(gh api "repos/$repo/labels/$review_label" --jq .name 2>&1) && label_exists=1 || label_exists=0
+if ((label_exists == 0)) && [[ "$label_status" != *"404"* && "$label_status" != *"Not Found"* ]]; then
+    fail "cannot read label $review_label on $repo: $label_status"
+fi
+
 # An update keeps what the template does not define:
 # - rules of other types (for example required_signatures) stay as they are;
 # - parameters that the template does not set stay as they are;
@@ -209,6 +216,12 @@ for bot in "${bots[@]}"; do
     run api -X PUT "repos/$repo/collaborators/$bot" -f permission=push --silent
 done
 printf 'bot access: %s (write)\n' "${bots[*]}"
+
+if ((label_exists == 0)); then
+    run api -X POST "repos/$repo/labels" -f name="$review_label" -f color=0e8a16 \
+        -f description="Ask the review bots to review this pull request" --silent
+fi
+printf 'opt-in label: %s (add it to a pull request to request bot review)\n' "$review_label"
 
 if [[ "$visibility" != public ]]; then
     printf 'ruleset: skipped. GitHub Free enforces rulesets only on public repositories.\n'

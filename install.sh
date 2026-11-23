@@ -70,6 +70,7 @@ PR_REVIEW_ANTIGRAVITY_EFFORT=""
 PR_REVIEW_PATH=""
 PR_REVIEW_ALERT_REPO=""
 PR_REVIEW_OWNER=""
+PR_REVIEW_LABEL=""
 QUORUM_CONFIG_FILE=""
 QUORUM_CONFIG_FILES=""
 PR_REVIEW_UPDATE_LOCK=""
@@ -119,6 +120,9 @@ render_cron_block() {
             "PR_REVIEW_PROVIDER=$PR_REVIEW_PROVIDER"
             "PR_REVIEW_REVIEWER=$PR_REVIEW_REVIEWER"
         )
+        if [[ -n "$PR_REVIEW_LABEL" ]]; then
+            env_parts+=("PR_REVIEW_LABEL=$PR_REVIEW_LABEL")
+        fi
         if [[ -n "$PR_REVIEW_OWNER" ]]; then
             env_parts+=("PR_REVIEW_OWNER=$PR_REVIEW_OWNER")
         fi
