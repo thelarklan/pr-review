@@ -13,6 +13,21 @@ fail() {
     exit 1
 }
 
+# A pull request with many long reviews (here about 450 KB in 2 pages) must not exceed
+# the 128 KiB limit for one command argument.
+large_review_count=$(
+    github_request() {
+        local page="${2##*page=}" count=100
+        [[ "$page" == 2 ]] && count=50
+        jq -cn --argjson count "$count" --arg body "$(printf 'x%.0s' {1..3000})" \
+            '[range($count) | {id: ., body: $body}]'
+    }
+    installation_token=test-token
+    collect_pages '/repos/owner/repo/pulls/1/reviews' '.' | jq 'length'
+)
+[[ "$large_review_count" == 150 ]] ||
+    fail "collect_pages lost reviews on a large review list: ${large_review_count:-error}"
+
 bot_codex=270192887
 bot_claude=104110997
 bot_gemini=320627233

@@ -85,8 +85,9 @@ collect_pages() {
             "$installation_token") || return 1
         items=$(jq -ce "$filter" <<<"$response") || return 1
         count=$(jq -r 'length' <<<"$items") || return 1
-        combined=$(jq -cn --argjson current "$combined" --argjson next "$items" \
-            '$current + $next') || return 1
+        # Pass the pages on standard input. A command argument is limited to 128 KiB,
+        # and a pull request with many long reviews is larger than that.
+        combined=$(printf '%s\n%s\n' "$combined" "$items" | jq -cs '.[0] + .[1]') || return 1
         ((count < 100)) && break
         page=$((page + 1))
     done
