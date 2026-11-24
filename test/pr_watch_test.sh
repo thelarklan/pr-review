@@ -49,17 +49,60 @@ case " $* " in
         printf 'head-one\tfalse\tother-user\n'
         ;;
     *" /repos/thelarklan/repo/pulls/1/reviews?per_page=100 "*)
-        if [[ "$GH_SCENARIO" != "new-head" ]]; then
-            if [[ "$GH_SCENARIO" == "dismissed" ]]; then
-                printf 'larkbot-codex\thead-one\t2026-08-26T10:00:00Z\tDISMISSED\n'
-            else
-                printf 'larkbot-codex\thead-one\t2026-08-26T10:00:00Z\tAPPROVED\n'
-            fi
-        fi
+        case "$GH_SCENARIO" in
+            new-head) ;;
+            dismissed)
+                printf 'larkbot-codex\thead-one\t2026-08-26T10:00:00Z\tDISMISSED\t10\n'
+                ;;
+            tiered-defer)
+                printf 'larkbot-codex\thead-old\t2026-08-26T10:00:00Z\tAPPROVED\t10\n'
+                printf 'larkbot-claude\thead-old\t2026-08-26T10:01:00Z\tCHANGES_REQUESTED\t11\n'
+                ;;
+            tiered-push-dismissed)
+                printf 'larkbot-codex\thead-old\t2026-08-26T10:00:00Z\tDISMISSED\t10\n'
+                printf 'larkbot-claude\thead-old\t2026-08-26T10:01:00Z\tCHANGES_REQUESTED\t11\n'
+                ;;
+            tiered-manual-dismissed)
+                printf 'larkbot-codex\thead-old\t2026-08-26T10:00:00Z\tDISMISSED\t10\n'
+                printf 'larkbot-claude\thead-old\t2026-08-26T10:01:00Z\tCHANGES_REQUESTED\t11\n'
+                ;;
+            tiered-first-pass)
+                printf 'larkbot-claude\thead-one\t2026-08-26T10:01:00Z\tCHANGES_REQUESTED\t11\n'
+                ;;
+            tiered-self-dissent)
+                printf 'larkbot-codex\thead-old\t2026-08-26T10:00:00Z\tCHANGES_REQUESTED\t10\n'
+                printf 'larkbot-claude\thead-old\t2026-08-26T10:01:00Z\tCHANGES_REQUESTED\t11\n'
+                ;;
+            tiered-settled)
+                printf 'larkbot-codex\thead-old\t2026-08-26T10:00:00Z\tAPPROVED\t10\n'
+                printf 'larkbot-claude\thead-old\t2026-08-26T10:01:00Z\tCHANGES_REQUESTED\t11\n'
+                printf 'larkbot-claude\thead-one\t2026-08-26T10:05:00Z\tAPPROVED\t12\n'
+                ;;
+            tiered-peer-commented-head)
+                printf 'larkbot-codex\thead-old\t2026-08-26T10:00:00Z\tAPPROVED\t10\n'
+                printf 'larkbot-claude\thead-old\t2026-08-26T10:01:00Z\tCHANGES_REQUESTED\t11\n'
+                printf 'larkbot-claude\thead-one\t2026-08-26T10:05:00Z\tCOMMENTED\t12\n'
+                ;;
+            tiered-human-dissent)
+                printf 'larkbot-codex\thead-old\t2026-08-26T10:00:00Z\tAPPROVED\t10\n'
+                printf 'thelarklan\thead-old\t2026-08-26T10:01:00Z\tCHANGES_REQUESTED\t11\n'
+                ;;
+            tiered-override)
+                printf 'larkbot-codex\thead-old\t2026-08-26T10:00:00Z\tAPPROVED\t10\n'
+                printf 'larkbot-claude\thead-old\t2026-08-26T10:01:00Z\tCHANGES_REQUESTED\t11\n'
+                ;;
+            *)
+                printf 'larkbot-codex\thead-one\t2026-08-26T10:00:00Z\tAPPROVED\t10\n'
+                ;;
+        esac
         ;;
     *" /repos/thelarklan/repo/issues/1/timeline?per_page=100 "*)
         if [[ "$GH_SCENARIO" == "ready" ]]; then
             printf '20\t2026-08-26T10:01:00Z\n'
+        elif [[ "$GH_SCENARIO" == "tiered-push-dismissed" ]]; then
+            printf 'approved\thead-one\n'
+        elif [[ "$GH_SCENARIO" == "tiered-manual-dismissed" ]]; then
+            printf 'approved\t\n'
         fi
         ;;
     *" api graphql "*)
@@ -76,7 +119,7 @@ case " $* " in
         esac
         ;;
     *" /repos/thelarklan/repo/issues/1/comments?per_page=100&since=2026-08-26T10:00:00Z "*)
-        if [[ "$GH_SCENARIO" == "command" ]]; then
+        if [[ "$GH_SCENARIO" == "command" || "$GH_SCENARIO" == "tiered-override" ]]; then
             printf '%s\t%s\n' "${GH_EVENT_ID:-40}" "${GH_EVENT_TIME:-2026-08-26T10:03:00Z}"
         fi
         ;;
@@ -225,5 +268,51 @@ grep -Fq 'GitHub pull-request search failed' "$test_dir/stderr" || fail "API fai
 run_watch ceiling "$test_dir/ceiling.state"
 [[ "$watch_status" -ne 0 ]] || fail "search ceiling returned success"
 grep -Fq "1000-result ceiling" "$test_dir/stderr" || fail "search truncation was silent"
+
+# Tiered re-review tests.
+cohort="larkbot-codex,larkbot-claude,larkbot-gemini"
+run_watch tiered-defer "$test_dir/bad-cohort.state" 'PR_WATCH_COHORT=larkbot-codex;other'
+[[ "$watch_status" -eq 2 ]] || fail "invalid cohort list was accepted"
+
+run_watch tiered-defer "$test_dir/tiered-defer.state" PR_WATCH_COHORT="$cohort" PR_WATCH_VERBOSE=1
+[[ "$watch_status" -eq 0 ]] || fail "tiered deferral watch failed"
+[[ ! -s "$test_dir/stdout" ]] || fail "previously approved bot was not deferred while peer requested changes"
+grep -Fq 'deferring thelarklan/repo#1 at head-one (approved head-old; waiting on larkbot-claude)' "$test_dir/stderr" ||
+    fail "tiered deferral reason was not logged"
+
+run_watch tiered-push-dismissed "$test_dir/tiered-push-dismissed.state" PR_WATCH_COHORT="$cohort" PR_WATCH_VERBOSE=1
+[[ "$watch_status" -eq 0 ]] || fail "push-dismissed tiered watch failed"
+[[ ! -s "$test_dir/stdout" ]] || fail "push-dismissed prior approval was not deferred while peer requested changes"
+
+run_watch tiered-manual-dismissed "$test_dir/tiered-manual-dismissed.state" PR_WATCH_COHORT="$cohort"
+[[ "$watch_status" -eq 0 ]] || fail "manual-dismissed tiered watch failed"
+[[ "$(cat "$test_dir/stdout")" == "thelarklan/repo#1" ]] || fail "manually dismissed review was wrongly deferred"
+
+run_watch tiered-first-pass "$test_dir/tiered-first-pass.state" PR_WATCH_COHORT="$cohort"
+[[ "$watch_status" -eq 0 ]] || fail "first-pass tiered watch failed"
+[[ "$(cat "$test_dir/stdout")" == "thelarklan/repo#1" ]] || fail "first-pass review was wrongly deferred"
+
+run_watch tiered-self-dissent "$test_dir/tiered-self-dissent.state" PR_WATCH_COHORT="$cohort"
+[[ "$watch_status" -eq 0 ]] || fail "self-dissent tiered watch failed"
+[[ "$(cat "$test_dir/stdout")" == "thelarklan/repo#1" ]] || fail "dissenting reviewer was wrongly deferred"
+
+run_watch tiered-settled "$test_dir/tiered-settled.state" PR_WATCH_COHORT="$cohort"
+[[ "$watch_status" -eq 0 ]] || fail "settled tiered watch failed"
+[[ "$(cat "$test_dir/stdout")" == "thelarklan/repo#1" ]] || fail "settled PR did not wake previously approved bot"
+
+run_watch tiered-peer-commented-head "$test_dir/tiered-commented.state" PR_WATCH_COHORT="$cohort"
+[[ "$watch_status" -eq 0 ]] || fail "peer-commented-head tiered watch failed"
+[[ "$(cat "$test_dir/stdout")" == "thelarklan/repo#1" ]] || fail "peer COMMENTED on HEAD deadlocked deferred bot"
+
+run_watch tiered-human-dissent "$test_dir/tiered-human.state" PR_WATCH_COHORT="$cohort"
+[[ "$watch_status" -eq 0 ]] || fail "human-dissent tiered watch failed"
+[[ "$(cat "$test_dir/stdout")" == "thelarklan/repo#1" ]] || fail "non-cohort human CHANGES_REQUESTED wrongly deferred bot"
+
+override_state="$test_dir/tiered-override.state"
+run_watch tiered-override "$override_state" PR_WATCH_COHORT="$cohort"
+[[ "$watch_status" -eq 0 ]] || fail "override tiered watch failed"
+[[ "$(cat "$test_dir/stdout")" == "thelarklan/repo#1" ]] || fail "explicit review command did not wake deferred bot"
+run_watch tiered-override "$override_state" PR_WATCH_COHORT="$cohort"
+[[ "$watch_status" -eq 0 && ! -s "$test_dir/stdout" ]] || fail "override command woke deferred bot twice"
 
 printf 'pr-watch tests passed\n'

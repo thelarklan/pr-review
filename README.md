@@ -37,9 +37,18 @@ Cron jobs execute directly from the clone instead of copying binaries to `~/.loc
 Each bot reviewer runs each minute. Its lock skips a run while the previous review is still going.
 
 Review is opt-in. The bots review only pull requests with the label `bot-review` (`PR_REVIEW_LABEL` in `hosts/*.env`).
-To request review, run `gh pr edit NUMBER --add-label bot-review`.
-Add the label when the pull request is ready, because each new commit after that starts a new review by each bot.
+To request review, run `gh api -X POST /repos/OWNER/REPO/issues/NUMBER/labels -f 'labels[]=bot-review'`.
+Use the REST endpoint instead of `gh pr edit --add-label`, which fails on `gh` `2.46.0` after GitHub removed `projectCards`.
+Add the label when the pull request is ready.
+With `PR_REVIEW_COHORT` set, tiered re-reviews defer previously approved bots while another bot has `CHANGES_REQUESTED`.
+Once no bot requests changes, previously approved bots wake on the next poll for one final delta sign-off review.
+Comment `@<bot> review` or `/review <bot>` to wake a deferred bot immediately.
 On a repository with a ruleset, a pull request without the label stays blocked, because `bot-review-quorum` needs the approvals.
+
+Each bot host maintains a bare repository cache under `~/.local/share/pr-review/work/repos/` and one detached worktree per active pull request under `~/.local/share/pr-review/work/prs/`.
+`bin/pr-review-cron` updates the worktree to the exact head commit, passes the incremental diff range (`<prior_sha>..HEAD`) when available, and inlines the `pr-code-review` skill.
+Closed and merged pull-request worktrees are removed automatically on an hourly cleanup pass.
+When upgrading an older host that has ad-hoc clones directly under `~/.local/share/pr-review/work/`, remove those legacy directories manually after verifying the new layout.
 All roles run `bin/pr-review-update` hourly at minute `19` (`19 * * * *`).
 The updater shares the review lock and waits up to 50 minutes for a running review to finish.
 It verifies each new commit in a temporary export before it moves the live clone.

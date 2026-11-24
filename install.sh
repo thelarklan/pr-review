@@ -60,6 +60,7 @@ host_env="$repo_dir/hosts/${role}.env"
 PR_REVIEW_CRON_SCHEDULE=""
 PR_REVIEW_PROVIDER=""
 PR_REVIEW_REVIEWER=""
+PR_REVIEW_COHORT=""
 PR_REVIEW_CODEX_MODEL=""
 PR_REVIEW_CODEX_EFFORT=""
 PR_REVIEW_CLAUDE_MODEL=""
@@ -120,6 +121,9 @@ render_cron_block() {
             "PR_REVIEW_PROVIDER=$PR_REVIEW_PROVIDER"
             "PR_REVIEW_REVIEWER=$PR_REVIEW_REVIEWER"
         )
+        if [[ -n "$PR_REVIEW_COHORT" ]]; then
+            env_parts+=("PR_REVIEW_COHORT=$PR_REVIEW_COHORT")
+        fi
         if [[ -n "$PR_REVIEW_LABEL" ]]; then
             env_parts+=("PR_REVIEW_LABEL=$PR_REVIEW_LABEL")
         fi
@@ -181,7 +185,8 @@ mkdir -p "$HOME/.local/state/pr-review-update"
 if [[ "$role" == "services" ]]; then
     mkdir -p "$HOME/.cache/pr-review-quorum" "$HOME/.local/state/pr-review-quorum"
 else
-    mkdir -p "$HOME/.cache/pr-review" "$HOME/.local/state/pr-review" "$HOME/.local/share/pr-review/work"
+    mkdir -p "$HOME/.cache/pr-review" "$HOME/.local/state/pr-review" \
+        "$HOME/.local/share/pr-review/work/repos" "$HOME/.local/share/pr-review/work/prs"
 fi
 
 if ((no_crontab == 1)); then

@@ -48,6 +48,7 @@ assert_contains "$gemini_cron" 'PR_REVIEW_ANTIGRAVITY_MODEL=gemini-4-neon-medium
 assert_contains "$gemini_cron" 'PR_REVIEW_ANTIGRAVITY_EFFORT=""' "gemini effort should be empty"
 for cron in "$codex_cron" "$claude_cron" "$gemini_cron"; do
     assert_contains "$cron" 'PR_REVIEW_LABEL=bot-review' "bot cron line is missing the opt-in label"
+    assert_contains "$cron" 'PR_REVIEW_COHORT=larkbot-codex,larkbot-claude,larkbot-gemini' "bot cron line is missing the review cohort"
 done
 
 # services schedules only the quorum configs that exist.
@@ -111,6 +112,9 @@ HOME="$fake_home" "$install_dir/install.sh" --role services --no-crontab >/dev/n
 [[ -d "$fake_home/.cache/pr-review-quorum" ]] || fail "services cache directory missing"
 [[ -d "$fake_home/.local/state/pr-review-quorum" ]] || fail "services state directory missing"
 [[ -d "$fake_home/.local/state/pr-review-update" ]] || fail "updater state directory missing"
+HOME="$fake_home" "$install_dir/install.sh" --role codex --no-crontab >/dev/null
+[[ -d "$fake_home/.local/share/pr-review/work/repos" ]] || fail "bot bare-repo cache directory missing"
+[[ -d "$fake_home/.local/share/pr-review/work/prs" ]] || fail "bot per-PR worktree directory missing"
 
 fake_bin="$test_dir/bin"
 mkdir -p "$fake_bin"

@@ -26,6 +26,32 @@ _pr_watch_report_once() {
     printf '%s\n' "$output"
 }
 
+_pr_watch_is_newer() {
+    local submitted="$1" review_id="$2" prev_submitted="$3" prev_id="$4"
+    if [[ -z "$prev_submitted" || "$submitted" > "$prev_submitted" ]]; then
+        return 0
+    fi
+    if [[ "$submitted" == "$prev_submitted" && "$review_id" =~ ^[0-9]+$ && "$prev_id" =~ ^[0-9]+$ ]]; then
+        ((10#$review_id > 10#$prev_id)) && return 0
+    fi
+    return 1
+}
+
+_pr_watch_was_push_dismissed_approval() {
+    local repo="$1" number="$2" review_id="$3"
+    local dismissed_rows dismissed_state dismissal_commit
+    [[ -n "$review_id" ]] || return 1
+    dismissed_rows=$(gh api --paginate -H 'Accept: application/vnd.github+json' \
+        "/repos/$repo/issues/$number/timeline?per_page=100" \
+        --jq ".[] | select(.event == \"review_dismissed\" and ((.dismissed_review.review_id // 0) | tostring) == \"$review_id\") | [((.dismissed_review.state // \"\") | ascii_downcase), (.dismissed_review.dismissal_commit_id // \"\")] | @tsv") || return 2
+    while IFS=$'\t' read -r dismissed_state dismissal_commit; do
+        if [[ "$dismissed_state" == "approved" && -n "$dismissal_commit" ]]; then
+            return 0
+        fi
+    done <<<"$dismissed_rows"
+    return 1
+}
+
 main() {
     if [[ $# -ne 0 ]]; then
         printf 'usage: pr-watch\n' >&2
@@ -36,11 +62,13 @@ main() {
     # PR_WATCH_OWNER is one account or a comma-separated list, for example "thelarklan,thelarklanlabs".
     local owners="${PR_WATCH_OWNER:-thelarklan}"
     local configured_reviewer="${PR_WATCH_REVIEWER:-}"
+    # PR_WATCH_COHORT enables tiered re-reviews when set to the automated bot logins.
+    local cohort="${PR_WATCH_COHORT:-}"
     local verbose="${PR_WATCH_VERBOSE:-0}"
     local max_followups="${PR_WATCH_MAX_FOLLOWUPS:-2}"
-    local authenticated reviewer state_file lock_file lock_fd owner
+    local authenticated reviewer state_file lock_file lock_fd owner peer
     local rows row_count checked=0
-    local -a owner_args=() owner_list=()
+    local -a owner_args=() owner_list=() cohort_list=()
 
     if [[ ! "$owners" =~ ^[A-Za-z0-9-]+(,[A-Za-z0-9-]+)*$ ]]; then
         _pr_watch_error "PR_WATCH_OWNER must be a GitHub account name or a comma-separated list of names"
@@ -50,6 +78,13 @@ main() {
     for owner in "${owner_list[@]}"; do
         owner_args+=(--owner "$owner")
     done
+    if [[ -n "$cohort" ]]; then
+        if [[ ! "$cohort" =~ ^[A-Za-z0-9-]+(,[A-Za-z0-9-]+)*$ ]]; then
+            _pr_watch_error "PR_WATCH_COHORT must be a comma-separated list of GitHub logins"
+            return 2
+        fi
+        IFS=',' read -r -a cohort_list <<<"$cohort"
+    fi
     # PR_WATCH_LABEL makes review opt-in: only pull requests with this label are watched.
     # Empty means every open pull request of the owners.
     local label="${PR_WATCH_LABEL:-}"
@@ -119,12 +154,23 @@ main() {
     fi
 
     local row repo number search_author search_draft details head is_draft author
-    local review_rows login commit submitted review_state reviewed="" last_review=""
+    local review_rows login login_lc commit submitted review_state state_uc review_id
+    local reviewed="" last_review="" last_review_id=""
+    local my_decisive_state="" my_decisive_commit="" my_decisive_time="" my_decisive_id=""
+    local my_latest_time="" prior_approved=0 prior_approved_commit="" push_dismissed_status=0
+    local peer_lc blocking_list override_rows override_id override_time override_key
     local timeline_rows event_id event_time ready_id="" ready_time=""
     local repo_owner repo_name thread_rows resolved comments_truncated root_author comment_author
     local conversation_id="" conversation_time="" conversation_kind=""
     local command_rows command_id command_time followup_key followup_count escalation_key
     local graphql_query
+    local -a blocking_peers=()
+    local -A cohort_map=() peer_decisive_state=() peer_decisive_commit=() peer_decisive_time=() peer_decisive_id=()
+    local -A peer_any_state=() peer_any_commit=() peer_any_time=() peer_any_id=()
+
+    for peer in "${cohort_list[@]}"; do
+        cohort_map["${peer,,}"]=1
+    done
 
     # shellcheck disable=SC2016 # GraphQL variables are expanded by GitHub, not Bash.
     graphql_query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
@@ -168,22 +214,143 @@ main() {
         fi
 
         review_rows=$(gh api --paginate "/repos/$repo/pulls/$number/reviews?per_page=100" \
-            --jq '.[] | [(.user.login // ""), (.commit_id // ""), (.submitted_at // ""), (.state // "")] | @tsv') || {
+            --jq '.[] | [(.user.login // "-"), (if (.commit_id // "") == "" then "-" else .commit_id end), (if (.submitted_at // "") == "" then "-" else .submitted_at end), (if (.state // "") == "" then "-" else .state end), ((.id // 0) | tostring)] | @tsv') || {
             _pr_watch_error "cannot read reviews for $repo#$number"
             return 1
         }
         reviewed=""
         last_review=""
-        while IFS=$'\t' read -r login commit submitted review_state; do
+        last_review_id=""
+        my_decisive_state=""
+        my_decisive_commit=""
+        my_decisive_time=""
+        my_decisive_id=""
+        peer_decisive_state=()
+        peer_decisive_commit=()
+        peer_decisive_time=()
+        peer_decisive_id=()
+        peer_any_state=()
+        peer_any_commit=()
+        peer_any_time=()
+        peer_any_id=()
+        while IFS=$'\t' read -r login commit submitted review_state review_id; do
+            [[ "$login" == "-" ]] && login=""
+            [[ "$commit" == "-" ]] && commit=""
+            [[ "$submitted" == "-" ]] && submitted=""
+            [[ "$review_state" == "-" ]] && review_state=""
             [[ -n "$login" && -n "$submitted" ]] || continue
-            if [[ "${login,,}" == "${reviewer,,}" && "$review_state" != "DISMISSED" &&
-                ( -z "$last_review" || "$submitted" > "$last_review" ) ]]; then
-                reviewed="$commit"
-                last_review="$submitted"
+            login_lc="${login,,}"
+            state_uc="${review_state^^}"
+            if [[ "$login_lc" == "${reviewer,,}" ]]; then
+                if [[ "$state_uc" != "DISMISSED" ]] &&
+                    _pr_watch_is_newer "$submitted" "$review_id" "$last_review" "$last_review_id"; then
+                    reviewed="$commit"
+                    last_review="$submitted"
+                    last_review_id="$review_id"
+                fi
+                if [[ "$state_uc" == "APPROVED" || "$state_uc" == "CHANGES_REQUESTED" || "$state_uc" == "DISMISSED" ]] &&
+                    _pr_watch_is_newer "$submitted" "$review_id" "$my_decisive_time" "$my_decisive_id"; then
+                    my_decisive_state="$state_uc"
+                    my_decisive_commit="$commit"
+                    my_decisive_time="$submitted"
+                    my_decisive_id="$review_id"
+                fi
+            elif [[ -n "${cohort_map[$login_lc]:-}" && "$login_lc" != "${author,,}" ]]; then
+                if [[ "$state_uc" != "DISMISSED" ]] &&
+                    _pr_watch_is_newer "$submitted" "$review_id" "${peer_any_time[$login_lc]:-}" "${peer_any_id[$login_lc]:-}"; then
+                    peer_any_state["$login_lc"]="$state_uc"
+                    peer_any_commit["$login_lc"]="$commit"
+                    peer_any_time["$login_lc"]="$submitted"
+                    peer_any_id["$login_lc"]="$review_id"
+                fi
+                if [[ "$state_uc" == "APPROVED" || "$state_uc" == "CHANGES_REQUESTED" || "$state_uc" == "DISMISSED" ]] &&
+                    _pr_watch_is_newer "$submitted" "$review_id" "${peer_decisive_time[$login_lc]:-}" "${peer_decisive_id[$login_lc]:-}"; then
+                    peer_decisive_state["$login_lc"]="$state_uc"
+                    peer_decisive_commit["$login_lc"]="$commit"
+                    peer_decisive_time["$login_lc"]="$submitted"
+                    peer_decisive_id["$login_lc"]="$review_id"
+                fi
             fi
         done <<<"$review_rows"
 
         if [[ "$head" != "$reviewed" ]]; then
+            if ((${#cohort_list[@]} > 0)); then
+                blocking_peers=()
+                for peer in "${cohort_list[@]}"; do
+                    peer_lc="${peer,,}"
+                    if [[ "$peer_lc" == "${reviewer,,}" || "$peer_lc" == "${author,,}" ]]; then
+                        continue
+                    fi
+                    if [[ "${peer_decisive_state[$peer_lc]:-}" == "CHANGES_REQUESTED" ]]; then
+                        if [[ "${peer_decisive_commit[$peer_lc]:-}" != "$head" &&
+                            "${peer_any_commit[$peer_lc]:-}" == "$head" &&
+                            "${peer_any_state[$peer_lc]:-}" != "CHANGES_REQUESTED" ]]; then
+                            continue
+                        fi
+                        blocking_peers+=("$peer")
+                    fi
+                done
+
+                if ((${#blocking_peers[@]} > 0)); then
+                    prior_approved=0
+                    prior_approved_commit=""
+                    if [[ "$my_decisive_state" == "APPROVED" &&
+                        -n "$my_decisive_commit" && "$my_decisive_commit" != "$head" ]]; then
+                        prior_approved=1
+                        prior_approved_commit="$my_decisive_commit"
+                    elif [[ "$my_decisive_state" == "DISMISSED" &&
+                        -n "$my_decisive_commit" && "$my_decisive_commit" != "$head" &&
+                        -n "$my_decisive_id" ]]; then
+                        push_dismissed_status=0
+                        _pr_watch_was_push_dismissed_approval "$repo" "$number" "$my_decisive_id" || push_dismissed_status=$?
+                        if ((push_dismissed_status == 0)); then
+                            prior_approved=1
+                            prior_approved_commit="$my_decisive_commit"
+                        elif ((push_dismissed_status == 2)); then
+                            _pr_watch_error "cannot read timeline for $repo#$number"
+                            return 1
+                        fi
+                    fi
+
+                    if ((prior_approved == 1)); then
+                        my_latest_time="$last_review"
+                        if [[ -n "$my_decisive_time" &&
+                            ( -z "$my_latest_time" || "$my_decisive_time" > "$my_latest_time" ) ]]; then
+                            my_latest_time="$my_decisive_time"
+                        fi
+                        override_id=""
+                        override_time=""
+                        if [[ -n "$my_latest_time" ]]; then
+                            override_rows=$(gh api --paginate \
+                                "/repos/$repo/issues/$number/comments?per_page=100&since=$my_latest_time" \
+                                --jq ".[] | select(((.user.login // \"\") | ascii_downcase) != (\"$reviewer\" | ascii_downcase) and .created_at > \"$my_latest_time\" and (((.body // \"\") | ascii_downcase) | (contains(\"@${reviewer,,}\") or contains(\"/review ${reviewer,,}\")) and contains(\"review\"))) | [(.id | tostring), .created_at] | @tsv") || {
+                                _pr_watch_error "cannot read review commands for $repo#$number"
+                                return 1
+                            }
+                            while IFS=$'\t' read -r command_id command_time; do
+                                [[ -n "$command_id" && -n "$command_time" ]] || continue
+                                if [[ -z "$override_time" || "$command_time" > "$override_time" ]]; then
+                                    override_id="$command_id"
+                                    override_time="$command_time"
+                                fi
+                            done <<<"$override_rows"
+                        fi
+                        if [[ -n "$override_id" ]]; then
+                            override_key="$repo#$number override $head command $override_id"
+                            if _pr_watch_report_once "$state_file" "$override_key" "$repo#$number"; then
+                                continue
+                            fi
+                        fi
+                        if [[ "$verbose" == "1" ]]; then
+                            blocking_list=$(IFS=','; printf '%s' "${blocking_peers[*]}")
+                            printf 'pr-watch: deferring %s#%s at %s (approved %s; waiting on %s)\n' \
+                                "$repo" "$number" "$head" "$prior_approved_commit" "$blocking_list" >&2
+                        fi
+                        continue
+                    fi
+                fi
+            fi
+
             printf '%s#%s\n' "$repo" "$number"
             continue
         fi
