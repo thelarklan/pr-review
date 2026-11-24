@@ -160,6 +160,14 @@ touch -d '2 hours ago' "$services_home/.local/state/pr-review-quorum/thelarklanl
 PATH="$fake_bin:$PATH" HOME="$services_home" "$install_dir/install.sh" --role services >/dev/null
 [[ -n "$(find "$services_home/.local/state/pr-review-quorum/thelarklanlabs.scheduled" -mmin +60)" ]] ||
     fail "a second services install must keep the first schedule time"
+# Preserved crontab lines must not create schedule files or stop the install.
+rm -f "$services_home/.local/state/pr-review-quorum/"*.scheduled
+printf '# QUORUM_STATUS_FILE="$HOME/absent-dir/backup.status"\n' >"$test_dir/crontab.store"
+PATH="$fake_bin:$PATH" HOME="$services_home" "$install_dir/install.sh" --role services >/dev/null ||
+    fail "a preserved crontab comment stopped the services install"
+[[ -f "$services_home/.local/state/pr-review-quorum/thelarklanlabs.scheduled" ]] ||
+    fail "the managed schedule file was not written"
+[[ ! -e "$services_home/absent-dir" ]] || fail "a preserved crontab line created a schedule file"
 
 if "$install_dir/install.sh" --role unknown >/dev/null 2>&1; then
     fail "invalid role succeeded"

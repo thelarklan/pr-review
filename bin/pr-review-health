@@ -357,12 +357,14 @@ cron_value() {
 check_quorum_poll() {
     local config_name="$1" config_entry="$2"
     local cron_line status_file log scheduled_file
+    # Search only the quorum commands inside the managed block.
     cron_line=$(crontab -l 2>/dev/null |
-        grep -v '^[[:space:]]*#' |
+        awk '/^# BEGIN pr-review$/ { on = 1; next } /^# END pr-review$/ { on = 0 } on' |
+        grep -F '/bin/pr-review-quorum"' |
         grep -F "QUORUM_CONFIG_FILE=\"$config_entry\"" |
         head -n 1)
     if [[ -z "$cron_line" ]]; then
-        report WARN quorum "$config_name: the crontab does not schedule this config; run install.sh --role services"
+        report FAIL quorum "$config_name: the crontab does not schedule this config; run install.sh --role services"
         return
     fi
     status_file=$(cron_value "$cron_line" 'QUORUM_STATUS_FILE=')

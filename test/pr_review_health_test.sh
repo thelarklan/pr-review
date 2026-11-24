@@ -418,6 +418,30 @@ assert_contains "$output" 'WARN quorum    thelarklanlabs: the crontab does not r
 } >"$services_crontab"
 write_poll_status "$quorum_status" 0
 
+# A job outside the managed block with the same config must not hide a failed managed poll.
+cp "$services_crontab" "$test_dir/crontab.services.good"
+write_poll_status "$test_dir/other.status" 0
+{
+    printf '* * * * * /usr/bin/env QUORUM_CONFIG_FILE="$HOME/.config/pr-review/thelarklanlabs.env" QUORUM_STATUS_FILE="%s" /opt/other/bin/pr-review-quorum"\n' \
+        "$test_dir/other.status"
+    cat "$test_dir/crontab.services.good"
+} >"$services_crontab"
+write_poll_status "$quorum_status" 1
+if run_health --role services; then
+    fail "a job outside the managed block hid a failed managed poll"
+fi
+assert_contains "$output" 'FAIL quorum    thelarklanlabs: the last poll at' "the managed status file was not read"
+write_poll_status "$quorum_status" 0
+
+# A config that exists but has no scheduled poll fails.
+grep -vF '/bin/pr-review-quorum"' "$test_dir/crontab.services.good" >"$services_crontab"
+if run_health --role services; then
+    fail "an existing config without a scheduled poll must fail"
+fi
+assert_contains "$output" 'FAIL quorum    thelarklanlabs: the crontab does not schedule this config' \
+    "a missing scheduled poll was not reported"
+cp "$test_dir/crontab.services.good" "$services_crontab"
+
 # One missing config only warns. When no configured config exists, the check fails.
 mv "$config_dir/pr-review-quorum.env" "$test_dir/pr-review-quorum.env.saved"
 run_health --role services || fail "one missing config must only warn: $output"

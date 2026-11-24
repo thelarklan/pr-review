@@ -232,6 +232,6 @@ if [[ "$role" == "services" ]]; then
         scheduled_file="${status_path/\$HOME/$HOME}"
         scheduled_file="${scheduled_file%.status}.scheduled"
         [[ -e "$scheduled_file" ]] || : >"$scheduled_file"
-    done < <(grep -oE 'QUORUM_STATUS_FILE="[^"]+"' "$tmp_crontab" | cut -d'"' -f2)
+    done < <(render_cron_block 2>/dev/null | grep -oE 'QUORUM_STATUS_FILE="[^"]+"' | cut -d'"' -f2)
 fi
 printf 'Installed pr-review %s schedule from %s\n' "$role" "$repo_dir"
