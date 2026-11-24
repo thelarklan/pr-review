@@ -85,6 +85,7 @@ case "$1 $2" in
         printf '%s\n' "$FAKE_GH_LOGIN"
         ;;
     "issue list")
+        [[ -z "${FAKE_GH_ISSUE_FAIL:-}" ]] || exit 1
         printf '%s' "${FAKE_GH_ISSUES:-}"
         ;;
     *) exit 1 ;;
@@ -331,6 +332,14 @@ user_quorum_status="$state_dir/pr-review-quorum/pr-review-quorum.status"
 write_poll_status() {
     printf '%s %s\n' "$(stamp now)" "$2" >"$1"
 }
+# The health check reads the status and log paths from the installed services crontab.
+codex_crontab="$FAKE_CRONTAB"
+services_crontab="$test_dir/crontab.services"
+{
+    printf 'SHELL=/bin/bash\n'
+    bash "$clone/install.sh" --role services --print-crontab
+} >"$services_crontab"
+export FAKE_CRONTAB="$services_crontab"
 printf 'pr-review-quorum: could not list open pull requests for a/b\n{"repository":"a/b","pull":1}\n' >"$quorum_log"
 write_poll_status "$quorum_status" 0
 printf '{"repository":"thelarklan/x","pull":1}\n' >"$user_quorum_log"
@@ -366,10 +375,47 @@ fi
 assert_contains "$output" 'FAIL quorum    thelarklanlabs: no finished poll for 60 minutes' "stopped poll was not reported"
 write_poll_status "$quorum_status" 0
 
-# A host that has not installed the status file yet only warns.
+# The check reads the paths that cron writes, also when XDG_STATE_HOME names another folder.
+other_state="$test_dir/other-state"
+mkdir -p "$other_state/pr-review-update"
+cp "$updater_log" "$other_state/pr-review-update/cron.log"
+write_poll_status "$quorum_status" 1
+if XDG_STATE_HOME="$other_state" run_health --role services; then
+    fail "a failed poll must fail with a custom XDG_STATE_HOME"
+fi
+assert_contains "$output" 'FAIL quorum    thelarklanlabs: the last poll at' "the status file that cron writes was not read"
+write_poll_status "$quorum_status" 0
+XDG_STATE_HOME="$other_state" run_health --role services || fail "good polls must pass with a custom XDG_STATE_HOME: $output"
+
+# The crontab records the poll status, but no poll has finished. Allow time only after install.sh schedules it.
 rm -f "$quorum_status"
-run_health --role services || fail "a missing status file must only warn: $output"
-assert_contains "$output" 'WARN quorum    thelarklanlabs: no poll status at' "missing status file was not reported"
+quorum_scheduled="$state_dir/pr-review-quorum/thelarklanlabs.scheduled"
+if run_health --role services; then
+    fail "an installed poll without a status file must fail"
+fi
+assert_contains "$output" 'FAIL quorum    thelarklanlabs: cron runs this poll, but no poll has finished' \
+    "missing status file was not reported"
+touch "$quorum_scheduled"
+run_health --role services || fail "a poll scheduled recently must only warn: $output"
+assert_contains "$output" 'WARN quorum    thelarklanlabs: scheduled recently; no poll has finished yet' \
+    "a recently scheduled poll was not reported"
+touch -d '1 hour ago' "$quorum_scheduled"
+if run_health --role services; then
+    fail "a poll scheduled long ago without a status file must fail"
+fi
+assert_contains "$output" 'FAIL quorum    thelarklanlabs: cron runs this poll, but no poll has finished' \
+    "an old schedule without a status file was not reported"
+rm -f "$quorum_scheduled"
+
+# A host with an older crontab that does not record the poll status only warns.
+sed -i 's/ QUORUM_STATUS_FILE="[^"]*"//' "$services_crontab"
+run_health --role services || fail "an older crontab must only warn: $output"
+assert_contains "$output" 'WARN quorum    thelarklanlabs: the crontab does not record the poll status' \
+    "an older crontab was not reported"
+{
+    printf 'SHELL=/bin/bash\n'
+    bash "$clone/install.sh" --role services --print-crontab
+} >"$services_crontab"
 write_poll_status "$quorum_status" 0
 
 # One missing config only warns. When no configured config exists, the check fails.
@@ -383,6 +429,7 @@ fi
 assert_contains "$output" 'FAIL config    no quorum config exists' "no config was not reported"
 mv "$test_dir/pr-review-quorum.env.saved" "$config_dir/pr-review-quorum.env"
 mv "$test_dir/thelarklanlabs.env.saved" "$config_dir/thelarklanlabs.env"
+export FAKE_CRONTAB="$codex_crontab"
 
 # 12. scripts/check-hosts.sh runs the check through wsl.exe and lists health issues.
 # Each call gets /dev/null as stdin, because the fake gh reads stdin.
@@ -408,6 +455,14 @@ output=$(FAKE_GH_ISSUES='#12 [bot-health] codex (larkbot-codex) review alert' PR
     bash "$project_dir/scripts/check-hosts.sh" codex=other 2>&1 </dev/null) || status=$?
 ((status == 1)) || fail "an open health issue must fail check-hosts.sh"
 assert_contains "$output" 'FAIL #12 [bot-health] codex (larkbot-codex) review alert' "health issue was not listed"
+# A failed issue lookup makes the check incomplete, so it must not report healthy hosts.
+status=0
+output=$(FAKE_GH_ISSUE_FAIL=1 PR_REVIEW_WSL_BIN="$fake_bin/wsl.exe" \
+    bash "$project_dir/scripts/check-hosts.sh" codex=other 2>&1 </dev/null) || status=$?
+((status == 1)) || fail "a failed issue lookup must fail check-hosts.sh: $output"
+assert_contains "$output" 'FAIL cannot list issues in thelarklanlabs/pr-review, so the check is incomplete' \
+    "failed issue lookup was not reported"
+assert_not_contains "$output" 'all hosts are healthy' "a failed issue lookup reported healthy hosts"
 if bash "$project_dir/scripts/check-hosts.sh" nobody >/dev/null 2>&1; then
     fail "an unknown role must fail"
 fi

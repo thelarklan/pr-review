@@ -150,6 +150,17 @@ assert_contains "$installed_store" '/usr/local/bin/unrelated-job' "unrelated cro
 [[ "$(grep -Fc '# BEGIN pr-review' <<<"$installed_store")" == 1 ]] || \
     fail "install.sh duplicated managed crontab block"
 
+# A services install records when it first schedules each quorum poll, for bin/pr-review-health.
+PATH="$fake_bin:$PATH" HOME="$services_home" "$install_dir/install.sh" --role services >/dev/null
+for config_name in pr-review-quorum thelarklanlabs; do
+    [[ -f "$services_home/.local/state/pr-review-quorum/$config_name.scheduled" ]] ||
+        fail "services install did not record the schedule time of $config_name"
+done
+touch -d '2 hours ago' "$services_home/.local/state/pr-review-quorum/thelarklanlabs.scheduled"
+PATH="$fake_bin:$PATH" HOME="$services_home" "$install_dir/install.sh" --role services >/dev/null
+[[ -n "$(find "$services_home/.local/state/pr-review-quorum/thelarklanlabs.scheduled" -mmin +60)" ]] ||
+    fail "a second services install must keep the first schedule time"
+
 if "$install_dir/install.sh" --role unknown >/dev/null 2>&1; then
     fail "invalid role succeeded"
 fi

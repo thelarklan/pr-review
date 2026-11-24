@@ -224,4 +224,14 @@ trap 'rm -f -- "$tmp_crontab"' EXIT
 } >"$tmp_crontab"
 
 crontab "$tmp_crontab"
+
+# Record when each quorum poll was first scheduled.
+# bin/pr-review-health gives a new poll this much time to write its first status file.
+if [[ "$role" == "services" ]]; then
+    while IFS= read -r status_path; do
+        scheduled_file="${status_path/\$HOME/$HOME}"
+        scheduled_file="${scheduled_file%.status}.scheduled"
+        [[ -e "$scheduled_file" ]] || : >"$scheduled_file"
+    done < <(grep -oE 'QUORUM_STATUS_FILE="[^"]+"' "$tmp_crontab" | cut -d'"' -f2)
+fi
 printf 'Installed pr-review %s schedule from %s\n' "$role" "$repo_dir"

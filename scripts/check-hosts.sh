@@ -60,11 +60,14 @@ for target in "${targets[@]}"; do
 done
 
 printf '\n== open [bot-health] issues in %s\n' "$alert_repo"
+# A skipped issue lookup is an incomplete check, so it counts as a problem.
 if ! command -v gh >/dev/null 2>&1; then
-    printf 'WARN gh is not installed here; cannot list the issues\n'
+    printf 'FAIL gh is not installed here; cannot list the issues, so the check is incomplete\n'
+    problems=$((problems + 1))
 elif ! issues=$(gh issue list --repo "$alert_repo" --state open --search '"[bot-health]" in:title' \
     --json number,title --jq '.[] | "#\(.number) \(.title)"' 2>/dev/null); then
-    printf 'WARN cannot list issues in %s\n' "$alert_repo"
+    printf 'FAIL cannot list issues in %s, so the check is incomplete\n' "$alert_repo"
+    problems=$((problems + 1))
 elif [[ -z "$issues" ]]; then
     printf 'OK   none\n'
 else

@@ -318,8 +318,9 @@ check_quorum() {
     local existing=0
     local -a config_list=()
     read -r -a config_list <<<"${QUORUM_CONFIG_FILES:-$QUORUM_CONFIG_FILE}"
-    for config_file in "${config_list[@]}"; do
-        config_file="${config_file//\$HOME/$HOME}"
+    local config_entry
+    for config_entry in "${config_list[@]}"; do
+        config_file="${config_entry//\$HOME/$HOME}"
         config_name=$(basename -- "$config_file" .env)
         if [[ ! -f "$config_file" ]]; then
             report WARN config "$config_file does not exist; install.sh does not schedule it"
@@ -333,7 +334,7 @@ check_quorum() {
         else
             report OK config "$config_name.env exists with mode 600"
         fi
-        check_quorum_poll "$config_name"
+        check_quorum_poll "$config_name" "$config_entry"
     done
 
     # One missing config is normal on an organization-only host. No config means no quorum check.
@@ -342,15 +343,42 @@ check_quorum() {
     fi
 }
 
+# Print the value of NAME="..." in a crontab line, with $HOME expanded.
+cron_value() {
+    local line="$1" name="$2" value
+    value=$(grep -oE "$name\"[^\"]+\"" <<<"$line" | head -n 1 | cut -d'"' -f2)
+    printf '%s\n' "${value//\$HOME/$HOME}"
+}
+
 # Each App installation has its own status file (see install.sh).
 # pr-review-quorum writes "TIME STATUS" to it when a poll ends.
 # A poll can log errors and still print a result line, so judge the exit status, not the log.
+# Read the status and log paths from the installed crontab, so the check reads what cron writes.
 check_quorum_poll() {
-    local config_name="$1"
-    local status_file="$state_root/pr-review-quorum/$config_name.status"
-    local log="$state_root/pr-review-quorum/$config_name.log"
+    local config_name="$1" config_entry="$2"
+    local cron_line status_file log scheduled_file
+    cron_line=$(crontab -l 2>/dev/null |
+        grep -v '^[[:space:]]*#' |
+        grep -F "QUORUM_CONFIG_FILE=\"$config_entry\"" |
+        head -n 1)
+    if [[ -z "$cron_line" ]]; then
+        report WARN quorum "$config_name: the crontab does not schedule this config; run install.sh --role services"
+        return
+    fi
+    status_file=$(cron_value "$cron_line" 'QUORUM_STATUS_FILE=')
+    log=$(cron_value "$cron_line" '>>')
+    if [[ -z "$status_file" ]]; then
+        report WARN quorum "$config_name: the crontab does not record the poll status; run install.sh --role services"
+        return
+    fi
     if [[ ! -f "$status_file" ]]; then
-        report WARN quorum "$config_name: no poll status at $status_file; run install.sh --role services"
+        # install.sh writes the .scheduled file when it first schedules the poll.
+        scheduled_file="${status_file%.status}.scheduled"
+        if [[ -f "$scheduled_file" ]] && (($(minutes_since_change "$scheduled_file") <= max_idle_minutes)); then
+            report WARN quorum "$config_name: scheduled recently; no poll has finished yet"
+        else
+            report FAIL quorum "$config_name: cron runs this poll, but no poll has finished; read ${log:-the log} and check cron"
+        fi
         return
     fi
 
