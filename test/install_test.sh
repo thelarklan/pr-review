@@ -73,6 +73,12 @@ services_cron=$(HOME="$services_home" "$install_dir/install.sh" --role services 
 assert_contains "$services_cron" '* * * * * ' "services schedule missing"
 assert_contains "$services_cron" '/pr-review-quorum.lock" /usr/bin/env QUORUM_CONFIG_FILE="$HOME/.config/pr-review/pr-review-quorum.env"' "services user-account config missing"
 assert_contains "$services_cron" '/thelarklanlabs.lock" /usr/bin/env QUORUM_CONFIG_FILE="$HOME/.config/pr-review/thelarklanlabs.env"' "services organization config missing"
+assert_contains "$services_cron" '>>"$HOME/.local/state/pr-review-quorum/pr-review-quorum.log" 2>&1' "user-account quorum log missing"
+assert_contains "$services_cron" '>>"$HOME/.local/state/pr-review-quorum/thelarklanlabs.log" 2>&1' "organization quorum log missing"
+assert_contains "$services_cron" 'QUORUM_STATUS_FILE="$HOME/.local/state/pr-review-quorum/pr-review-quorum.status"' \
+    "user-account quorum status file missing"
+assert_contains "$services_cron" 'QUORUM_STATUS_FILE="$HOME/.local/state/pr-review-quorum/thelarklanlabs.status"' \
+    "organization quorum status file missing"
 [[ "$(grep -c 'bin/pr-review-quorum"' <<<"$services_cron")" == 2 ]] || \
     fail "services must run one quorum pass per config"
 assert_contains "$services_cron" "$install_dir/bin/pr-review-quorum" "services quorum path mismatch"
@@ -143,6 +149,45 @@ installed_store=$(<"$test_dir/crontab.store")
 assert_contains "$installed_store" '/usr/local/bin/unrelated-job' "unrelated cron job was lost"
 [[ "$(grep -Fc '# BEGIN pr-review' <<<"$installed_store")" == 1 ]] || \
     fail "install.sh duplicated managed crontab block"
+
+# A services install records when it first schedules each quorum poll, for bin/pr-review-health.
+PATH="$fake_bin:$PATH" HOME="$services_home" "$install_dir/install.sh" --role services >/dev/null
+for config_name in pr-review-quorum thelarklanlabs; do
+    [[ -f "$services_home/.local/state/pr-review-quorum/$config_name.scheduled" ]] ||
+        fail "services install did not record the schedule time of $config_name"
+done
+touch -d '2 hours ago' "$services_home/.local/state/pr-review-quorum/thelarklanlabs.scheduled"
+PATH="$fake_bin:$PATH" HOME="$services_home" "$install_dir/install.sh" --role services >/dev/null
+[[ -n "$(find "$services_home/.local/state/pr-review-quorum/thelarklanlabs.scheduled" -mmin +60)" ]] ||
+    fail "a second services install must keep the first schedule time"
+# Preserved crontab lines must not create schedule files or stop the install.
+rm -f "$services_home/.local/state/pr-review-quorum/"*.scheduled
+printf '# QUORUM_STATUS_FILE="$HOME/absent-dir/backup.status"\n' >"$test_dir/crontab.store"
+PATH="$fake_bin:$PATH" HOME="$services_home" "$install_dir/install.sh" --role services >/dev/null ||
+    fail "a preserved crontab comment stopped the services install"
+[[ -f "$services_home/.local/state/pr-review-quorum/thelarklanlabs.scheduled" ]] ||
+    fail "the managed schedule file was not written"
+[[ ! -e "$services_home/absent-dir" ]] || fail "a preserved crontab line created a schedule file"
+# Write the schedule files from the block that was installed, even when a config moves after the install.
+moving_bin="$test_dir/moving-bin"
+mkdir -p "$moving_bin"
+cat >"$moving_bin/crontab" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "-l" ]]; then
+    exit 1
+fi
+cat -- "\$1" >"$test_dir/crontab.moving"
+mv "\$HOME/.config/pr-review/thelarklanlabs.env" "$test_dir/thelarklanlabs.env.moved"
+EOF
+chmod +x "$moving_bin/crontab"
+rm -f "$services_home/.local/state/pr-review-quorum/"*.scheduled
+PATH="$moving_bin:$PATH" HOME="$services_home" "$install_dir/install.sh" --role services >/dev/null ||
+    fail "the services install with a moving config failed"
+mv "$test_dir/thelarklanlabs.env.moved" "$services_home/.config/pr-review/thelarklanlabs.env"
+grep -Fq 'QUORUM_CONFIG_FILE="$HOME/.config/pr-review/thelarklanlabs.env"' "$test_dir/crontab.moving" ||
+    fail "the installed crontab is missing the organization job"
+[[ -f "$services_home/.local/state/pr-review-quorum/thelarklanlabs.scheduled" ]] ||
+    fail "an installed job has no schedule file"
 
 if "$install_dir/install.sh" --role unknown >/dev/null 2>&1; then
     fail "invalid role succeeded"

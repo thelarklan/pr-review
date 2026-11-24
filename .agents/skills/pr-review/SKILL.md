@@ -1,6 +1,6 @@
 ---
 name: pr-review
-description: "Enroll a repository in bot review, create the bot-review-quorum GitHub App, or install a review host role for thelarklanlabs/pr-review. Use when setting up automated PR review, rulesets, or quorum checks."
+description: "Enroll a repository in bot review, create the bot-review-quorum GitHub App, install a review host role, or check the health of the review hosts for thelarklanlabs/pr-review. Use when setting up automated PR review, rulesets, or quorum checks, or when the review bots seem stuck or out of date."
 ---
 
 # Pull request review setup
@@ -60,3 +60,9 @@ After you replace the App, run `scripts/enroll-repo.sh` again for each repositor
 3. Run `bash ~/projects/repos/pr-review/install.sh --role ROLE`.
    Valid roles are `codex`, `claude`, `gemini`, and `services`.
 4. On `services`, keep each App config, `repo-policy.json`, and each `.pem` key in `~/.config/pr-review/` with mode `600`.
+
+## Check host health
+
+1. From Windows or from WSL, run `bash scripts/check-hosts.sh` in a clone of this repository.
+2. Read each line that starts with `FAIL` or `WARN`.
+3. On one host only, run `bin/pr-review-health`.

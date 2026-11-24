@@ -84,7 +84,8 @@ render_cron_block() {
     local runner_cmd=""
 
     if [[ "$role" == "services" ]]; then
-        # One quorum pass per GitHub App installation, each with its own lock.
+        # One quorum pass per GitHub App installation, each with its own lock, log, and status file.
+        # bin/pr-review-health reads the status file of each installation to judge its last poll.
         local config_files="${QUORUM_CONFIG_FILES:-$QUORUM_CONFIG_FILE}"
         local config_file config_name line
         local -a config_list=()
@@ -107,8 +108,8 @@ render_cron_block() {
                 printf 'install.sh: not scheduling %s: the file does not exist\n' "$config_file" >&2
                 continue
             fi
-            line=$(printf '%s /usr/bin/flock -n "$HOME/.cache/pr-review-quorum/%s.lock" /usr/bin/env QUORUM_CONFIG_FILE="%s" "%s/bin/pr-review-quorum" >>"$HOME/.local/state/pr-review-quorum/cron.log" 2>&1' \
-                "$PR_REVIEW_CRON_SCHEDULE" "$config_name" "$config_file" "$repo_dir")
+            line=$(printf '%s /usr/bin/flock -n "$HOME/.cache/pr-review-quorum/%s.lock" /usr/bin/env QUORUM_CONFIG_FILE="%s" QUORUM_STATUS_FILE="$HOME/.local/state/pr-review-quorum/%s.status" "%s/bin/pr-review-quorum" >>"$HOME/.local/state/pr-review-quorum/%s.log" 2>&1' \
+                "$PR_REVIEW_CRON_SCHEDULE" "$config_name" "$config_file" "$config_name" "$repo_dir" "$config_name")
             runner_cmd+="${runner_cmd:+$'\n'}$line"
             update_lock+="${update_lock:+:}\$HOME/.cache/pr-review-quorum/$config_name.lock"
         done
@@ -212,6 +213,8 @@ fi
 tmp_crontab=$(mktemp)
 trap 'rm -f -- "$tmp_crontab"' EXIT
 
+# Render the block once. The schedule files below must match the block that cron gets.
+cron_block=$(render_cron_block)
 {
     if [[ -n "$header_lines" ]]; then
         printf '%s' "$header_lines"
@@ -219,8 +222,18 @@ trap 'rm -f -- "$tmp_crontab"' EXIT
     if [[ -n "$cleaned_crontab" ]]; then
         printf '%s\n' "$cleaned_crontab"
     fi
-    render_cron_block
+    printf '%s\n' "$cron_block"
 } >"$tmp_crontab"
 
 crontab "$tmp_crontab"
+
+# Record when each quorum poll was first scheduled.
+# bin/pr-review-health gives a new poll this much time to write its first status file.
+if [[ "$role" == "services" ]]; then
+    while IFS= read -r status_path; do
+        scheduled_file="${status_path/\$HOME/$HOME}"
+        scheduled_file="${scheduled_file%.status}.scheduled"
+        [[ -e "$scheduled_file" ]] || : >"$scheduled_file"
+    done < <(grep -oE 'QUORUM_STATUS_FILE="[^"]+"' <<<"$cron_block" | cut -d'"' -f2)
+fi
 printf 'Installed pr-review %s schedule from %s\n' "$role" "$repo_dir"
