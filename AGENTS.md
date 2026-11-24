@@ -7,7 +7,7 @@ This public repository owns the automated pull-request review bots and the `bot-
 1. Run `bash scripts/verify.sh` inside Linux or WSL before you commit.
 2. Do not commit `.env` files, `.pem` keys, tokens, or `repo-policy.json`.
 3. Keep all files with LF line endings.
-4. Keep the three copies of `SKILL.md` under `.claude/skills/pr-review/`, `.agents/skills/pr-review/`, and `.gemini/skills/pr-review/` identical.
+4. Keep all skill files under `.claude/skills/`, `.agents/skills/`, and `.gemini/skills/` identical for both `pr-review` and `pr-code-review`.
 5. Do not add `dev-tools` dependencies or install binaries into `~/.local/bin`.
 
 ## Key files

@@ -19,7 +19,9 @@ The `bot-review-quorum` check requires full 3-of-3 exact-head approval across `{
 
 Review is opt-in to limit AI usage.
 When a pull request is ready, add the label: `gh pr edit NUMBER --repo OWNER/REPO --add-label bot-review`.
-Each new commit after that starts a new review by each of the three bots.
+When one bot requests changes, previously approved bots wait until no bot requests changes.
+They then run one final delta sign-off review on the settled head commit.
+For code-review rules, use the `pr-code-review` skill.
 
 ## Enroll a repository
 

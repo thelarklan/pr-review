@@ -44,6 +44,19 @@ if [[ ! "$max_failures" =~ ^[1-9][0-9]*$ ]]; then
     exit 2
 fi
 
+cleanup_interval="${PR_REVIEW_CLEANUP_INTERVAL_SECONDS:-3600}"
+if [[ ! "$cleanup_interval" =~ ^(0|[1-9][0-9]*)$ ]]; then
+    printf 'pr-review-cron: PR_REVIEW_CLEANUP_INTERVAL_SECONDS must be a non-negative integer\n' >&2
+    exit 2
+fi
+
+git_base_url="${PR_REVIEW_GIT_BASE_URL:-https://github.com}"
+git_base_url="${git_base_url%/}"
+if [[ -z "$git_base_url" ]]; then
+    printf 'pr-review-cron: PR_REVIEW_GIT_BASE_URL must not be empty\n' >&2
+    exit 2
+fi
+
 review_path="${PR_REVIEW_PATH:-$PATH}"
 if [[ "$review_path" == "CHANGE_ME" ]]; then
     printf 'pr-review-cron: replace PR_REVIEW_PATH=CHANGE_ME with the provider toolchain PATH\n' >&2
@@ -53,19 +66,27 @@ export PATH="$HOME/.local/bin:$review_path"
 export LC_ALL=C
 
 pr_watch_bin="${PR_REVIEW_WATCH_BIN:-$script_dir/pr-watch}"
+skill_dir="${PR_REVIEW_SKILL_DIR:-$script_dir/../.agents/skills/pr-code-review}"
+skill_main_file="$skill_dir/SKILL.md"
+skill_first_pass_file="$skill_dir/FIRST-PASS.md"
+skill_delta_file="$skill_dir/DELTA-REVIEW.md"
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/pr-review"
 cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/pr-review"
 work_root="${PR_REVIEW_WORK_ROOT:-$HOME/.local/share/pr-review/work}"
+repos_root="$work_root/repos"
+prs_root="$work_root/prs"
 log_file="$state_dir/cron.log"
 state_file="$state_dir/pr-watch.seen"
 failure_file="$state_dir/provider-failures"
 last_alert_file="$state_dir/last-alert-key"
+cleanup_stamp_file="$state_dir/last-cleanup"
 owner="${PR_REVIEW_OWNER:-${PR_WATCH_OWNER:-thelarklan}}"
+cohort="${PR_REVIEW_COHORT:-${PR_WATCH_COHORT:-}}"
 # Opt-in label: when set, only pull requests with this label get an AI review.
 review_label="${PR_REVIEW_LABEL:-${PR_WATCH_LABEL:-}}"
 alert_repo="${PR_REVIEW_ALERT_REPO:-}"
 
-mkdir -p -- "$state_dir" "$cache_dir" "$work_root"
+mkdir -p -- "$state_dir" "$cache_dir" "$work_root" "$repos_root" "$prs_root"
 touch -- "$log_file" "$state_file" "$failure_file"
 if (( $(stat -c %s -- "$log_file") > 5242880 )); then
     tail -n 2000 -- "$log_file" >"$log_file.next"
@@ -78,6 +99,12 @@ if [[ ! -x "$pr_watch_bin" ]]; then
     printf 'pr-review-cron: missing watcher executable %s\n' "$pr_watch_bin"
     exit 1
 fi
+for required_skill in "$skill_main_file" "$skill_first_pass_file" "$skill_delta_file"; do
+    if [[ ! -f "$required_skill" ]]; then
+        printf 'pr-review-cron: missing review skill file %s\n' "$required_skill"
+        exit 1
+    fi
+done
 
 authenticated=$(gh api user --jq '.login') || {
     printf 'pr-review-cron: cannot read the authenticated GitHub identity\n'
@@ -98,11 +125,12 @@ delta_file="$run_dir/state.delta"
 failure_next="$run_dir/provider-failures.next"
 provider_out="$run_dir/provider.out"
 alert_next="$run_dir/last-alert-key.next"
+cleanup_stamp_next="$run_dir/last-cleanup.next"
 
 cleanup() {
     rm -f -- "$work_file" "$error_file" "$candidate_state" "$before_state" \
         "$delta_file" "$failure_next" "$provider_out" "$alert_next" \
-        "${candidate_state}.lock"
+        "$cleanup_stamp_next" "${candidate_state}.lock"
     rmdir -- "$run_dir" 2>/dev/null || true
 }
 trap cleanup EXIT HUP INT TERM
@@ -114,6 +142,7 @@ set +e
 PR_WATCH_STATE="$candidate_state" \
 DEV_TOOLS_PR_WATCH_STATE="$candidate_state" \
 PR_WATCH_OWNER="$owner" \
+PR_WATCH_COHORT="$cohort" \
 PR_WATCH_LABEL="$review_label" \
 PR_WATCH_REVIEWER="$reviewer" \
 PR_WATCH_MAX_FOLLOWUPS="${PR_REVIEW_MAX_FOLLOWUPS:-2}" \
@@ -177,11 +206,230 @@ prune_other_heads() {
     mv -f -- "$failure_next" "$failure_file"
 }
 
-latest_review() {
+is_newer_review() {
+    local submitted="$1" review_id="$2" prev_submitted="$3" prev_id="$4"
+    if [[ -z "$prev_submitted" || "$submitted" > "$prev_submitted" ]]; then
+        return 0
+    fi
+    if [[ "$submitted" == "$prev_submitted" && "$review_id" =~ ^[0-9]+$ && "$prev_id" =~ ^[0-9]+$ ]]; then
+        ((10#$review_id > 10#$prev_id)) && return 0
+    fi
+    return 1
+}
+
+was_push_dismissed_approval() {
+    local repo="$1" number="$2" review_id="$3"
+    local dismissed_rows dismissed_state dismissal_commit
+    [[ -n "$review_id" ]] || return 1
+    dismissed_rows=$(gh api --paginate -H 'Accept: application/vnd.github+json' \
+        "/repos/$repo/issues/$number/timeline?per_page=100" \
+        --jq ".[] | select(.event == \"review_dismissed\" and ((.dismissed_review.review_id // 0) | tostring) == \"$review_id\") | [((.dismissed_review.state // \"\") | ascii_downcase), (.dismissed_review.dismissal_commit_id // \"\")] | @tsv") || return 2
+    while IFS=$'\t' read -r dismissed_state dismissal_commit; do
+        if [[ "$dismissed_state" == "approved" && -n "$dismissal_commit" ]]; then
+            return 0
+        fi
+    done <<<"$dismissed_rows"
+    return 1
+}
+
+inspect_reviewer_state() {
+    local repo="$1" number="$2" include_dismissed_context="${3:-1}"
+    local rows review_id commit submitted state
+    local active_id="" active_commit="" active_time="" active_state=""
+    local decisive_id="" decisive_commit="" decisive_time="" decisive_state=""
+    local prior_id="" prior_commit="" prior_state="" push_status=0
+
+    rows=$(gh api --paginate "/repos/$repo/pulls/$number/reviews?per_page=100" \
+        --jq ".[] | select(((.user.login // \"\") | ascii_downcase) == \"${reviewer,,}\") | [((.id // 0) | tostring), (if (.commit_id // \"\") == \"\" then \"-\" else .commit_id end), (if (.submitted_at // \"\") == \"\" then \"-\" else .submitted_at end), (if (.state // \"\") == \"\" then \"-\" else (.state | ascii_upcase) end)] | @tsv") || return 1
+
+    while IFS=$'\t' read -r review_id commit submitted state; do
+        [[ "$commit" == "-" ]] && commit=""
+        [[ "$submitted" == "-" ]] && submitted=""
+        [[ "$state" == "-" ]] && state=""
+        [[ -n "$review_id" && "$review_id" != "0" ]] || continue
+        if [[ "$state" != "DISMISSED" ]] &&
+            is_newer_review "$submitted" "$review_id" "$active_time" "$active_id"; then
+            active_id="$review_id"
+            active_commit="$commit"
+            active_time="$submitted"
+            active_state="$state"
+        fi
+        if [[ "$state" == "APPROVED" || "$state" == "CHANGES_REQUESTED" || "$state" == "DISMISSED" ]] &&
+            is_newer_review "$submitted" "$review_id" "$decisive_time" "$decisive_id"; then
+            decisive_id="$review_id"
+            decisive_commit="$commit"
+            decisive_time="$submitted"
+            decisive_state="$state"
+        fi
+    done <<<"$rows"
+
+    if (( include_dismissed_context == 1 )); then
+        if [[ "$decisive_state" == "DISMISSED" && -n "$decisive_id" ]] &&
+            is_newer_review "$decisive_time" "$decisive_id" "$active_time" "$active_id"; then
+            push_status=0
+            was_push_dismissed_approval "$repo" "$number" "$decisive_id" || push_status=$?
+            if (( push_status == 0 )); then
+                prior_id="$decisive_id"
+                prior_commit="$decisive_commit"
+                prior_state="APPROVED (dismissed on push)"
+            elif (( push_status == 2 )); then
+                return 1
+            else
+                prior_id=""
+                prior_commit=""
+                prior_state="DISMISSED (manual)"
+            fi
+        elif [[ -n "$active_id" ]]; then
+            prior_id="$active_id"
+            prior_commit="$active_commit"
+            prior_state="$active_state"
+        fi
+    fi
+
+    printf '%s\n%s\n%s\n%s\n%s\n' \
+        "$active_id" "$active_commit" "$prior_id" "$prior_commit" "$prior_state"
+}
+
+read_pr_metadata() {
     local repo="$1" number="$2"
-    gh api --paginate "/repos/$repo/pulls/$number/reviews?per_page=100" \
-        --jq ".[] | select(((.user.login // \"\") | ascii_downcase) == \"${reviewer,,}\" and (.state // \"\") != \"DISMISSED\") | [(.id | tostring), (.commit_id // \"\")] | @tsv" \
-        | tail -n 1
+    gh pr view "$number" --repo "$repo" \
+        --json headRefOid,baseRefName,baseRefOid,url \
+        --jq '(.headRefOid // ""), (.baseRefName // ""), (.baseRefOid // ""), (.url // "")'
+}
+
+read_skill_body() {
+    local file="$1"
+    awk '
+        NR == 1 && $0 == "---" { in_frontmatter = 1; next }
+        in_frontmatter && $0 == "---" { in_frontmatter = 0; skip_blank = 1; next }
+        in_frontmatter { next }
+        skip_blank && $0 == "" { skip_blank = 0; next }
+        { skip_blank = 0; print }
+    ' "$file"
+}
+
+prepare_pr_worktree() {
+    local repo="$1" number="$2" base_ref="$3" current_head="$4"
+    local repo_owner repo_name bare_repo effort_dir pr_worktree pr_scratch remote_url
+    local clone_tmp="" fetched_head="" actual_head=""
+    local -a git_auth_args=()
+
+    if [[ "$repo" == *".."* ]]; then
+        printf 'pr-review-cron: refusing unsafe repository name %s\n' "$repo" >&2
+        return 1
+    fi
+    if ! git check-ref-format "refs/heads/$base_ref" >/dev/null 2>&1; then
+        printf 'pr-review-cron: refusing unsafe base ref %s for %s#%s\n' "$base_ref" "$repo" "$number" >&2
+        return 1
+    fi
+
+    repo_owner="${repo%/*}"
+    repo_name="${repo#*/}"
+    bare_repo="$repos_root/$repo_owner/$repo_name.git"
+    effort_dir="$prs_root/${repo_owner}__${repo_name}__pr-${number}"
+    pr_worktree="$effort_dir/repo"
+    pr_scratch="$effort_dir/scratch"
+    remote_url="$git_base_url/$repo.git"
+
+    if [[ "$remote_url" == https://* ]]; then
+        git_auth_args=(-c credential.helper= -c 'credential.helper=!gh auth git-credential')
+    fi
+
+    mkdir -p -- "$(dirname -- "$bare_repo")" "$effort_dir" "$pr_scratch"
+
+    if [[ ! -d "$bare_repo" || "$(git -C "$bare_repo" rev-parse --is-bare-repository 2>/dev/null || true)" != "true" ]]; then
+        rm -rf -- "$bare_repo"
+        clone_tmp=$(mktemp -d "${bare_repo}.clone.XXXXXXXX")
+        if ! git "${git_auth_args[@]}" clone --bare --no-tags -- "$remote_url" "$clone_tmp" >&2; then
+            rm -rf -- "$clone_tmp"
+            return 1
+        fi
+        mv -T -- "$clone_tmp" "$bare_repo"
+    fi
+
+    if ! git -C "$bare_repo" "${git_auth_args[@]}" fetch --no-tags "$remote_url" \
+        "+refs/heads/$base_ref:refs/remotes/origin/$base_ref" \
+        "+refs/pull/$number/head:refs/remotes/origin/pr/$number" >&2; then
+        return 1
+    fi
+
+    fetched_head=$(git -C "$bare_repo" rev-parse "refs/remotes/origin/pr/$number^{commit}" 2>/dev/null || true)
+    if [[ "$fetched_head" != "$current_head" ]]; then
+        printf 'pr-review-cron: %s#%s head moved during fetch (expected %s, got %s)\n' \
+            "$repo" "$number" "$current_head" "${fetched_head:-missing}" >&2
+        return 1
+    fi
+
+    git -C "$bare_repo" worktree prune >&2
+    if [[ -e "$pr_worktree" ]]; then
+        if [[ ! -f "$pr_worktree/.git" || "$(git -C "$pr_worktree" rev-parse --is-inside-work-tree 2>/dev/null || true)" != "true" ]]; then
+            rm -rf -- "$pr_worktree"
+            git -C "$bare_repo" worktree prune >&2
+        fi
+    fi
+
+    if [[ ! -e "$pr_worktree" ]]; then
+        git -C "$bare_repo" worktree add --force --detach "$pr_worktree" "$current_head" >&2 || return 1
+    else
+        git -C "$pr_worktree" checkout --force --detach "$current_head" >&2 || return 1
+    fi
+
+    git -C "$pr_worktree" reset --hard "$current_head" >&2 || return 1
+    git -C "$pr_worktree" clean -ffdx >&2 || return 1
+
+    actual_head=$(git -C "$pr_worktree" rev-parse HEAD 2>/dev/null || true)
+    if [[ "$actual_head" != "$current_head" ]]; then
+        printf 'pr-review-cron: worktree HEAD mismatch for %s#%s (expected %s, got %s)\n' \
+            "$repo" "$number" "$current_head" "${actual_head:-unknown}" >&2
+        return 1
+    fi
+
+    printf 'repo=%s\nnumber=%s\nbare_repo=%s\n' "$repo" "$number" "$bare_repo" >"$effort_dir/pr.meta"
+    printf '%s\n%s\n' "$pr_worktree" "$pr_scratch"
+}
+
+cleanup_closed_pr_worktrees() {
+    local now last_cleanup=0 entry meta_repo meta_number meta_bare_repo pr_state
+    local -a entries=()
+
+    shopt -s nullglob
+    entries=("$prs_root"/*)
+    shopt -u nullglob
+    (( ${#entries[@]} > 0 )) || return 0
+
+    now=$(date +%s)
+    if (( cleanup_interval > 0 )) && [[ -f "$cleanup_stamp_file" ]]; then
+        last_cleanup=$(<"$cleanup_stamp_file")
+        if [[ "$last_cleanup" =~ ^[0-9]+$ ]] && (( now - last_cleanup < cleanup_interval )); then
+            return 0
+        fi
+    fi
+
+    printf '%s\n' "$now" >"$cleanup_stamp_next"
+    mv -f -- "$cleanup_stamp_next" "$cleanup_stamp_file"
+
+    for entry in "${entries[@]}"; do
+        [[ -d "$entry" && -f "$entry/pr.meta" ]] || continue
+        meta_repo=$(awk -F= '$1 == "repo" { print substr($0, 6); exit }' "$entry/pr.meta")
+        meta_number=$(awk -F= '$1 == "number" { print substr($0, 8); exit }' "$entry/pr.meta")
+        if [[ ! "$meta_repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ || "$meta_repo" == *".."* || ! "$meta_number" =~ ^[0-9]+$ ]]; then
+            continue
+        fi
+        meta_bare_repo="$repos_root/$meta_repo.git"
+        pr_state=$(gh pr view "$meta_number" --repo "$meta_repo" --json state --jq '.state' 2>/dev/null || true)
+        case "$pr_state" in
+            MERGED | CLOSED)
+                if [[ -n "$meta_bare_repo" && -d "$meta_bare_repo" ]]; then
+                    git -C "$meta_bare_repo" worktree remove --force "$entry/repo" >/dev/null 2>&1 || true
+                    git -C "$meta_bare_repo" worktree prune >/dev/null 2>&1 || true
+                    git -C "$meta_bare_repo" update-ref -d "refs/remotes/origin/pr/$meta_number" >/dev/null 2>&1 || true
+                fi
+                rm -rf -- "$entry"
+                printf '[%s] cleaned up %s PR workspace %s#%s\n' \
+                    "$(date --iso-8601=seconds)" "$pr_state" "$meta_repo" "$meta_number"
+                ;;
+        esac
+    done
 }
 
 resolve_executable() {
@@ -199,7 +447,7 @@ resolve_executable() {
 }
 
 run_provider() {
-    local prompt="$1" executable driver
+    local prompt="$1" pr_worktree="$2" pr_scratch="$3" executable driver
     local codex_model codex_effort claude_model claude_effort agy_model agy_effort
     local -a codex_args claude_args agy_args
 
@@ -218,7 +466,7 @@ run_provider() {
             if [[ -n "$codex_effort" ]]; then
                 codex_args+=(--config "model_reasoning_effort=\"$codex_effort\"")
             fi
-            codex_args+=(-C "$work_root" "$prompt")
+            codex_args+=(--add-dir "$pr_scratch" -C "$pr_worktree" "$prompt")
             timeout --signal=TERM --kill-after=2m "${PR_REVIEW_TIMEOUT:-45m}" \
                 "$executable" "${codex_args[@]}"
             ;;
@@ -237,7 +485,7 @@ run_provider() {
             if [[ -n "$claude_effort" ]]; then
                 claude_args+=(--effort "$claude_effort")
             fi
-            claude_args+=("$prompt")
+            claude_args+=(--add-dir "$pr_scratch" "$prompt")
             timeout --signal=TERM --kill-after=2m "${PR_REVIEW_TIMEOUT:-45m}" \
                 "$executable" "${claude_args[@]}"
             ;;
@@ -269,7 +517,7 @@ run_provider() {
                     if [[ -n "$agy_effort" ]]; then
                         agy_args+=(--effort "$agy_effort")
                     fi
-                    agy_args+=("--print=$prompt")
+                    agy_args+=(--add-dir "$pr_scratch" "--print=$prompt")
                     timeout --signal=TERM --kill-after=2m "${PR_REVIEW_TIMEOUT:-45m}" \
                         "$executable" "${agy_args[@]}"
                     ;;
@@ -347,6 +595,10 @@ resolve_health_alert() {
     rm -f -- "$last_alert_file"
 }
 
+skill_main_body=$(read_skill_body "$skill_main_file")
+skill_first_pass_body=$(read_skill_body "$skill_first_pass_file")
+skill_delta_body=$(read_skill_body "$skill_delta_file")
+
 prune_inactive_failures
 
 processed=0
@@ -376,17 +628,34 @@ while IFS= read -r item; do
     repo="${item%#*}"
     number="${item##*#}"
     set +e
-    current_head=$(gh pr view "$number" --repo "$repo" --json headRefOid --jq '.headRefOid')
-    current_head_status=$?
-    before_review=$(latest_review "$repo" "$number")
+    pr_meta_raw=$(read_pr_metadata "$repo" "$number")
+    pr_meta_status=$?
+    before_review_raw=$(inspect_reviewer_state "$repo" "$number" 1)
     before_review_status=$?
     set -e
-    if ((current_head_status != 0 || before_review_status != 0)); then
+    if ((pr_meta_status != 0 || before_review_status != 0)); then
         failed=$((failed + 1))
         printf 'pr-review-cron: preparation query failed for %s (head-status=%s, review-status=%s); provider not started\n' \
-            "$item" "$current_head_status" "$before_review_status"
+            "$item" "$pr_meta_status" "$before_review_status"
         continue
     fi
+    mapfile -t pr_meta <<<"$pr_meta_raw"
+    current_head="${pr_meta[0]:-}"
+    base_ref="${pr_meta[1]:-}"
+    base_sha="${pr_meta[2]:-}"
+    pr_url="${pr_meta[3]:-}"
+    if [[ -z "$current_head" || -z "$base_ref" ]]; then
+        failed=$((failed + 1))
+        printf 'pr-review-cron: incomplete pull-request metadata for %s; provider not started\n' "$item"
+        continue
+    fi
+
+    mapfile -t before_review <<<"$before_review_raw"
+    before_review_id="${before_review[0]:-}"
+    prior_review_id="${before_review[2]:-}"
+    prior_review_commit="${before_review[3]:-}"
+    prior_review_state="${before_review[4]:-}"
+
     prune_other_heads "$item" "$current_head"
     attempt_count=$(failure_count "$item" "$current_head")
     if ((attempt_count >= max_failures)); then
@@ -395,23 +664,84 @@ while IFS= read -r item; do
             "$(date --iso-8601=seconds)" "$item" "$current_head" "$attempt_count"
         continue
     fi
-    before_review_id="${before_review%%$'\t'*}"
+
+    set +e
+    worktree_raw=$(prepare_pr_worktree "$repo" "$number" "$base_ref" "$current_head")
+    worktree_status=$?
+    set -e
+    if ((worktree_status != 0)); then
+        failed=$((failed + 1))
+        printf 'pr-review-cron: workspace preparation failed for %s at %s; provider not started\n' \
+            "$item" "$current_head"
+        continue
+    fi
+    mapfile -t worktree_info <<<"$worktree_raw"
+    pr_worktree="${worktree_info[0]:-}"
+    pr_scratch="${worktree_info[1]:-}"
+
+    review_mode="first-pass"
+    branch_body="$skill_first_pass_body"
+    diff_range="origin/$base_ref...$current_head"
+    delta_summary=""
+    if [[ -n "$prior_review_commit" ]]; then
+        if [[ "$prior_review_commit" == "$current_head" ]]; then
+            review_mode="same-head-followup"
+            branch_body="$skill_delta_body"
+            diff_range="origin/$base_ref...$current_head"
+        elif git -C "$pr_worktree" cat-file -e "${prior_review_commit}^{commit}" 2>/dev/null &&
+            git -C "$pr_worktree" merge-base --is-ancestor "$prior_review_commit" "$current_head" 2>/dev/null; then
+            review_mode="delta-re-review"
+            branch_body="$skill_delta_body"
+            diff_range="$prior_review_commit..$current_head"
+            delta_commit_count=$(git -C "$pr_worktree" rev-list --count "$diff_range" 2>/dev/null || printf '0')
+            delta_stat=$(git -C "$pr_worktree" diff --stat "$diff_range" 2>/dev/null | head -n 40 || true)
+            delta_summary=$(printf 'Commits since prior review: %s\nDelta diffstat (%s):\n%s' \
+                "$delta_commit_count" "$diff_range" "${delta_stat:-none}")
+        else
+            review_mode="rebased-re-review"
+            branch_body="$skill_first_pass_body"
+            diff_range="origin/$base_ref...$current_head"
+        fi
+    fi
+    if [[ -z "$delta_summary" ]]; then
+        full_stat=$(git -C "$pr_worktree" diff --stat "$diff_range" 2>/dev/null | head -n 40 || true)
+        delta_summary=$(printf 'Diffstat (%s):\n%s' "$diff_range" "${full_stat:-none}")
+    fi
+
+    prior_context_line="Prior review by $reviewer: none"
+    if [[ -n "$prior_review_id" ]]; then
+        prior_context_line="Prior review by $reviewer: id=$prior_review_id state=${prior_review_state:-unknown} commit=${prior_review_commit:-unknown}"
+    elif [[ -n "$prior_review_state" ]]; then
+        prior_context_line="Prior review by $reviewer: state=$prior_review_state (full review required)"
+    fi
+
     prompt="$(printf '%s\n' \
         "This is an autonomous scheduled pull-request review for $item, running as GitHub identity $reviewer." \
         "" \
-        "Use the GitHub CLI for GitHub reads and the final review submission. Inspect the complete diff, repository instructions, prior review conversation, and relevant surrounding code. Run proportionate tests when feasible. Re-read the pull request head immediately before submitting so no stale review is posted." \
+        "## Run context" \
+        "- Pull request: $item (${pr_url:-https://github.com/$repo/pull/$number})" \
+        "- Review mode: $review_mode" \
+        "- Base branch: origin/$base_ref (${base_sha:-unknown})" \
+        "- Target head SHA: $current_head" \
+        "- Prepared git worktree (clean detached HEAD): $pr_worktree" \
+        "- Scratch directory (outside repo): $pr_scratch" \
+        "- $prior_context_line" \
+        "- Primary diff range: $diff_range" \
+        "- Required final line of the GitHub review body: _reviewed from: $provider-wsl-cron_" \
         "" \
-        "Before choosing a verdict, perform a separate defect-seeking pass independent of the pull request description and existing CI results. Identify the highest-risk changed behavior, trace its failure and boundary paths, and inspect whether tests could pass while documented behavior still fails. Findings must be concrete and evidence-backed; do not manufacture nits. Treat APPROVE as a conclusion reached only after this pass, not as the default outcome." \
+        "$delta_summary" \
         "" \
-        "Submit exactly one new GitHub pull-request review at the current head using APPROVE, COMMENT, or REQUEST_CHANGES as warranted. Do not merely print a review locally. End the review body with this marker on its own line:" \
-        "_reviewed from: $provider-wsl-cron_" \
+        "Use the prepared worktree directly; do not re-clone the repository. Keep any temporary files in $pr_scratch or /tmp." \
         "" \
-        "Do not merge, push commits, modify any branch, mark drafts ready, or approve a self-authored pull request. Keep temporary work under /tmp or $work_root. If a safe review cannot be completed, exit nonzero and explain why instead of submitting a guess.")"
+        "$skill_main_body" \
+        "" \
+        "$branch_body")"
 
-    printf '[%s] reviewing %s at %s\n' "$(date --iso-8601=seconds)" "$item" "$current_head"
+    printf '[%s] reviewing %s at %s (mode=%s, worktree=%s)\n' \
+        "$(date --iso-8601=seconds)" "$item" "$current_head" "$review_mode" "$pr_worktree"
     : >"$provider_out"
     set +e
-    (cd -- "$work_root" && run_provider "$prompt") >"$provider_out" 2>&1
+    (cd -- "$pr_worktree" && run_provider "$prompt" "$pr_worktree" "$pr_scratch") >"$provider_out" 2>&1
     provider_status=$?
     set -e
     cat -- "$provider_out"
@@ -426,11 +756,12 @@ while IFS= read -r item; do
     set +e
     after_head=$(gh pr view "$number" --repo "$repo" --json headRefOid --jq '.headRefOid')
     after_head_status=$?
-    after_review=$(latest_review "$repo" "$number")
+    after_review_raw=$(inspect_reviewer_state "$repo" "$number" 0)
     after_review_status=$?
     set -e
-    after_review_id="${after_review%%$'\t'*}"
-    after_review_commit="${after_review#*$'\t'}"
+    mapfile -t after_review <<<"$after_review_raw"
+    after_review_id="${after_review[0]:-}"
+    after_review_commit="${after_review[1]:-}"
     if (( provider_status == 0 && after_head_status == 0 && after_review_status == 0 )) &&
         [[ -n "$after_review_id" ]] &&
         [[ "$after_review_id" != "$before_review_id" ]] &&
@@ -459,6 +790,8 @@ while IFS= read -r item; do
         fi
     fi
 done <"$work_file"
+
+cleanup_closed_pr_worktrees
 
 if (( ${#alert_reasons[@]} > 0 )); then
     alert_fingerprint=$(printf '%s\n' "${alert_reasons[@]}" | LC_ALL=C sort -u | paste -sd ',' -)

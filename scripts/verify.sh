@@ -27,15 +27,34 @@ if crlf:
     print(f"CRLF line endings found: {', '.join(crlf)}", file=sys.stderr)
     sys.exit(1)
 
-skills = [
-    Path(".claude/skills/pr-review/SKILL.md"),
-    Path(".agents/skills/pr-review/SKILL.md"),
-    Path(".gemini/skills/pr-review/SKILL.md"),
+skill_roots = [
+    Path(".claude/skills"),
+    Path(".agents/skills"),
+    Path(".gemini/skills"),
 ]
-contents = [p.read_bytes() for p in skills]
-if any(c != contents[0] for c in contents[1:]):
-    print("Skill copies under .claude, .agents, and .gemini must match", file=sys.stderr)
-    sys.exit(1)
+expected_skills = ("pr-review", "pr-code-review")
+for skill_name in expected_skills:
+    trees = []
+    for root in skill_roots:
+        skill_dir = root / skill_name
+        if not skill_dir.is_dir():
+            print(f"Missing skill directory: {skill_dir}", file=sys.stderr)
+            sys.exit(1)
+        entries = {
+            str(p.relative_to(skill_dir)): p.read_bytes()
+            for p in sorted(skill_dir.rglob("*"))
+            if p.is_file()
+        }
+        if "SKILL.md" not in entries:
+            print(f"Missing SKILL.md in {skill_dir}", file=sys.stderr)
+            sys.exit(1)
+        trees.append(entries)
+    if any(tree != trees[0] for tree in trees[1:]):
+        print(
+            f"Skill copies for {skill_name} under .claude, .agents, and .gemini must match",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 PY
 
 for test_script in test/*.sh; do
