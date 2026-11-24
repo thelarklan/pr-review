@@ -574,9 +574,8 @@ assert_arg_pair "$provider_args" --model gemini-4-neon-high \
     "Antigravity model did not default to gemini-4-neon-high"
 assert_no_arg "$provider_args" --effort \
     "Antigravity passed --effort when PR_REVIEW_ANTIGRAVITY_EFFORT was empty"
-assert_arg_pair "$provider_args" --add-dir \
-    "$home_dir/.local/share/pr-review/work/prs/owner__gemini__pr-9/repo" \
-    "Antigravity --add-dir did not include PR scratch"
+assert_no_arg "$provider_args" --add-dir \
+    "Antigravity must not load PR workspace customizations"
 
 rm -- "$review_marker"
 HOME="$home_dir" \

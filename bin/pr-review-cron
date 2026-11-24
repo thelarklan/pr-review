@@ -497,7 +497,7 @@ run_provider() {
                         return 127
                     }
                     timeout --signal=TERM --kill-after=2m "${PR_REVIEW_TIMEOUT:-45m}" \
-                        "$executable" --include-directories "$pr_worktree" --prompt "$prompt" --approval-mode yolo \
+                        "$executable" --prompt "$prompt" --approval-mode yolo \
                         --output-format text
                     ;;
                 agy)
@@ -516,7 +516,7 @@ run_provider() {
                     if [[ -n "$agy_effort" ]]; then
                         agy_args+=(--effort "$agy_effort")
                     fi
-                    agy_args+=(--add-dir "$pr_worktree" "--print=$prompt")
+                    agy_args+=("--print=$prompt")
                     timeout --signal=TERM --kill-after=2m "${PR_REVIEW_TIMEOUT:-45m}" \
                         "$executable" "${agy_args[@]}"
                     ;;
