@@ -73,6 +73,8 @@ services_cron=$(HOME="$services_home" "$install_dir/install.sh" --role services 
 assert_contains "$services_cron" '* * * * * ' "services schedule missing"
 assert_contains "$services_cron" '/pr-review-quorum.lock" /usr/bin/env QUORUM_CONFIG_FILE="$HOME/.config/pr-review/pr-review-quorum.env"' "services user-account config missing"
 assert_contains "$services_cron" '/thelarklanlabs.lock" /usr/bin/env QUORUM_CONFIG_FILE="$HOME/.config/pr-review/thelarklanlabs.env"' "services organization config missing"
+assert_contains "$services_cron" '>>"$HOME/.local/state/pr-review-quorum/pr-review-quorum.log" 2>&1' "user-account quorum log missing"
+assert_contains "$services_cron" '>>"$HOME/.local/state/pr-review-quorum/thelarklanlabs.log" 2>&1' "organization quorum log missing"
 [[ "$(grep -c 'bin/pr-review-quorum"' <<<"$services_cron")" == 2 ]] || \
     fail "services must run one quorum pass per config"
 assert_contains "$services_cron" "$install_dir/bin/pr-review-quorum" "services quorum path mismatch"

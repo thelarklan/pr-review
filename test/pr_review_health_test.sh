@@ -36,6 +36,21 @@ assert_not_contains() {
     fi
 }
 
+# Fail when the output has a check row with this name, such as "OK   runner    ...".
+# Do not match the bare name: the header line has the user and host names, and CI runs as "runner".
+assert_no_row() {
+    local output="$1" name="$2" message="$3"
+    if grep -qE "^(OK|WARN|FAIL) +$name " <<<"$output"; then
+        printf '%s\n' "$output" >&2
+        fail "$message"
+    fi
+}
+
+# Print a log time stamp, as pr-review-cron writes it, for a time such as "5 minutes ago".
+stamp() {
+    date --iso-8601=seconds -d "$1"
+}
+
 home_dir="$test_dir/home"
 state_dir="$home_dir/.local/state"
 fake_bin="$test_dir/bin"
@@ -143,6 +158,17 @@ assert_contains "$output" 'OK   cli       codex 0.171.0 (latest)' "a newer CLI t
 FAKE_NPM_LATEST=0.172.0 run_health --no-latest || fail "--no-latest must pass"
 assert_contains "$output" 'OK   cli       codex 0.171.0' "--no-latest must skip the release check"
 
+# pr-review-cron puts ~/.local/bin before PR_REVIEW_PATH, so the health check must find that copy first.
+mkdir -p "$home_dir/.local/bin"
+cat >"$home_dir/.local/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+printf 'codex-cli 0.172.0\n'
+EOF
+chmod +x "$home_dir/.local/bin/codex"
+run_health --no-latest || fail "a CLI in ~/.local/bin must pass: $output"
+assert_contains "$output" 'OK   cli       codex 0.172.0' "the CLI in ~/.local/bin was not used"
+rm -f "$home_dir/.local/bin/codex"
+
 # 4. A runner that has not written for a long time fails.
 touch -d '30 minutes ago' "$runner_log"
 if run_health; then
@@ -151,31 +177,83 @@ fi
 assert_contains "$output" 'FAIL runner    no run for 30 minutes' "idle runner was not reported"
 write_clean_run
 
-# 5. An error in the last run fails, and a failed review is a warning.
+# 5. A fatal error stops the run before "watcher finished" and fails.
 printf '\n[2026-11-23T19:41:01-07:00] codex watcher started\npr-review-cron: authenticated as someone, expected larkbot-codex\n' >>"$runner_log"
 if run_health; then
     fail "a runner error must fail"
 fi
 assert_contains "$output" 'FAIL runner    pr-review-cron: authenticated as someone' "runner error was not reported"
-printf '\n[2026-11-23T19:42:01-07:00] codex watcher started\n[2026-11-23T19:42:09-07:00] codex watcher finished: 0 confirmed, 1 failed, 0 paused\n' >>"$runner_log"
-run_health || fail "a failed review attempt must only warn"
-assert_contains "$output" 'WARN runner    codex watcher finished: 0 confirmed, 1 failed, 0 paused' "failed review was not reported"
+
+# A failed review attempt writes a "pr-review-cron:" line, but the run finishes, so it only warns.
+{
+    printf '\n[2026-11-23T19:42:01-07:00] codex watcher started\n'
+    printf '[2026-11-23T19:42:05-07:00] reviewing thelarklanlabs/example#7 at 64cf1701234 (mode=full, worktree=/w)\n'
+    printf 'pr-review-cron: thelarklanlabs/example#7 was not confirmed (provider=1, before=none, after=none, head=64cf1701234)\n'
+    printf '[2026-11-23T19:42:09-07:00] codex watcher finished: 0 confirmed, 1 failed, 0 paused\n'
+} >>"$runner_log"
+run_health || fail "a failed review attempt must only warn: $output"
+assert_contains "$output" 'WARN runner    codex watcher finished: 0 confirmed, 1 failed, 0 paused; first error: pr-review-cron: thelarklanlabs/example#7 was not confirmed' \
+    "failed review was not reported"
 write_clean_run
 
-# 6. A review in progress passes, even when the log is old.
-# A process whose command line names bin/pr-review-cron stands in for the review.
+# 6. An active run. A process whose command line names bin/pr-review-cron stands in for the run.
 # The ": done" keeps bash from replacing itself with sleep.
-bash -c 'sleep 300; : done' "$clone/bin/pr-review-cron" &
-review_pid=$!
-printf '\n[2026-11-23T19:43:01-07:00] codex watcher started\n[2026-11-23T19:43:05-07:00] reviewing thelarklanlabs/example#7 at 64cf1701234\n' >>"$runner_log"
+start_fake_runner() {
+    bash -c 'sleep 300; : done' "$clone/bin/pr-review-cron" &
+    review_pid=$!
+}
+# The sleep child can exit first, and then its bash parent exits too. Accept a process that is gone.
+stop_fake_runner() {
+    pkill -P "$review_pid" 2>/dev/null || true
+    kill "$review_pid" 2>/dev/null || true
+    wait "$review_pid" 2>/dev/null || true
+    review_pid=""
+}
+start_fake_runner
+
+# A review in progress passes, even when the log is old. The time comes from the "reviewing" line.
+{
+    printf '\n[%s] codex watcher started\n' "$(stamp '6 minutes ago')"
+    printf '[%s] reviewing thelarklanlabs/example#7 at 64cf1701234 (mode=full, worktree=/w)\n' "$(stamp '5 minutes ago')"
+} >>"$runner_log"
 touch -d '20 minutes ago' "$runner_log"
 run_health || fail "a review in progress must pass: $output"
-assert_contains "$output" 'OK   runner    review in progress for 0 minutes: reviewing thelarklanlabs/example#7 at 64cf170' \
+assert_contains "$output" 'OK   runner    review in progress for 5 minutes: reviewing thelarklanlabs/example#7 at 64cf170' \
     "review in progress was not reported"
-pkill -P "$review_pid" || true
-kill "$review_pid"
-wait "$review_pid" 2>/dev/null || true
-review_pid=""
+
+# One run reviews each queued pull request in turn. Time only the current review, not the run.
+{
+    printf '\n[%s] codex watcher started\n' "$(stamp '61 minutes ago')"
+    printf '[%s] reviewing o/r#1 at aaaaaaa1111 (mode=full, worktree=/w)\n' "$(stamp '60 minutes ago')"
+    printf '[%s] confirmed review 11 for o/r#1 at aaaaaaa1111\n' "$(stamp '15 minutes ago')"
+    printf '[%s] reviewing o/r#2 at bbbbbbb2222 (mode=full, worktree=/w)\n' "$(stamp '15 minutes ago')"
+} >>"$runner_log"
+touch -d '15 minutes ago' "$runner_log"
+run_health || fail "the second review of a long run must pass: $output"
+assert_contains "$output" 'OK   runner    review in progress for 15 minutes: reviewing o/r#2 at bbbbbbb' \
+    "the second review was not timed from its own start"
+
+# A review that runs longer than its timeout fails.
+printf '\n[%s] codex watcher started\n[%s] reviewing o/r#3 at ccccccc3333 (mode=full, worktree=/w)\n' \
+    "$(stamp '56 minutes ago')" "$(stamp '55 minutes ago')" >>"$runner_log"
+touch -d '55 minutes ago' "$runner_log"
+if run_health; then
+    fail "a hung review must fail"
+fi
+assert_contains "$output" 'FAIL runner    review has run for 55 minutes, longer than the timeout: reviewing o/r#3 at ccccccc' \
+    "hung review was not reported"
+
+# A poll that writes its log passes. A poll that stops writing its log fails.
+printf '\n[%s] codex watcher started\n' "$(stamp 'now')" >>"$runner_log"
+run_health || fail "a poll in progress must pass: $output"
+assert_contains "$output" 'OK   runner    run in progress, last log write 0 minutes ago' "poll in progress was not reported"
+touch -d '65 minutes ago' "$runner_log"
+if run_health; then
+    fail "a stalled poll must fail"
+fi
+assert_contains "$output" 'FAIL runner    run in progress has not written its log for 65 minutes' "stalled poll was not reported"
+
+stop_fake_runner
 write_clean_run
 
 # 7. Paused and retrying pull requests are warnings.
@@ -243,22 +321,44 @@ mkdir -p "$home_dir/.config/pr-review"
 touch "$home_dir/.config/pr-review/pr-review-quorum.env" "$home_dir/.config/pr-review/thelarklanlabs.env"
 chmod 600 "$home_dir/.config/pr-review/pr-review-quorum.env"
 chmod 644 "$home_dir/.config/pr-review/thelarklanlabs.env"
-quorum_log="$state_dir/pr-review-quorum/cron.log"
+# Each App installation has its own log, named after its config file.
+quorum_log="$state_dir/pr-review-quorum/thelarklanlabs.log"
+user_quorum_log="$state_dir/pr-review-quorum/pr-review-quorum.log"
 printf 'pr-review-quorum: could not list open pull requests for a/b\n{"repository":"a/b","pull":1}\n' >"$quorum_log"
+printf '{"repository":"thelarklan/x","pull":1}\n' >"$user_quorum_log"
 run_health --role services --no-latest || true
 assert_contains "$output" 'OK   config    pr-review-quorum.env exists with mode 600' "good config mode missing"
 assert_contains "$output" 'thelarklanlabs.env has mode 644; run chmod 600 on it' "bad config mode missing"
-assert_contains "$output" 'OK   quorum    no errors after the last published result' "old errors before a result must pass"
-assert_not_contains "$output" 'runner' "services must not check a review runner"
+assert_contains "$output" 'OK   quorum    thelarklanlabs: no errors after the last published result' \
+    "old errors before a result must pass"
+assert_contains "$output" 'OK   quorum    pr-review-quorum: no errors after the last published result' \
+    "the user-account log was not checked"
+assert_no_row "$output" runner "services must not check a review runner"
 chmod 600 "$home_dir/.config/pr-review/thelarklanlabs.env"
 printf 'curl: (22) The requested URL returned error: 403\npr-review-quorum: could not list open pull requests for a/c\n' >>"$quorum_log"
 if run_health --role services; then
     fail "current quorum errors must fail"
 fi
-assert_contains "$output" 'FAIL quorum    1 error line(s) after the last result' "current quorum error was not reported"
+assert_contains "$output" 'FAIL quorum    thelarklanlabs: 1 error line(s) after the last result' "current quorum error was not reported"
 touch -d '1 hour ago' "$quorum_log"
 run_health --role services || fail "old quorum errors must only warn: $output"
-assert_contains "$output" 'WARN quorum    1 old error line(s), last write 60 minutes ago' "old quorum error was not reported"
+assert_contains "$output" 'WARN quorum    thelarklanlabs: 1 old error line(s), last write 60 minutes ago' \
+    "old quorum error was not reported"
+
+# A result from one installation must not hide a current error from the other.
+printf '{"repository":"a/b","pull":2}\n' >>"$quorum_log"
+printf 'pr-review-quorum: could not create an installation token\n' >>"$user_quorum_log"
+if run_health --role services; then
+    fail "an error of one installation must fail after a result of the other"
+fi
+assert_contains "$output" 'FAIL quorum    pr-review-quorum: 1 error line(s) after the last result' \
+    "the error of the user-account installation was hidden"
+assert_contains "$output" 'OK   quorum    thelarklanlabs: no errors after the last published result' \
+    "the organization result must pass"
+printf '{"repository":"thelarklan/x","pull":2}\n' >>"$user_quorum_log"
+rm -f "$quorum_log"
+run_health --role services || fail "a missing log must only warn: $output"
+assert_contains "$output" 'WARN quorum    thelarklanlabs: no log at' "missing installation log was not reported"
 
 # 12. scripts/check-hosts.sh runs the check through wsl.exe and lists health issues.
 # Each call gets /dev/null as stdin, because the fake gh reads stdin.

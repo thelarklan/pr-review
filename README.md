@@ -75,12 +75,12 @@ Each line starts with `OK`, `WARN`, or `FAIL`. The command exits `1` when a line
 | `clone` | all | The clone commit compared with `main`, the branch, and local changes. |
 | `crontab` | all | The `pr-review` block compared with `install.sh --print-crontab`, and old review entries. |
 | `updater` | all | The last result of `bin/pr-review-update`, and a run in the last 2 hours. |
-| `runner` | bots | A review in progress, a run in the last 10 minutes, and the counts of the last run. |
+| `runner` | bots | The age of the current review, a log write in the last 10 minutes outside a review, and the counts of the last run. |
 | `failures` | bots | Paused and retrying pull requests in `provider-failures`. |
 | `github` | bots | The `gh` login compared with the bot account. |
 | `cli` | bots | The AI CLI version compared with the latest npm release. `agy` has no release feed. |
 | `config` | `services` | Each quorum config exists with mode `600`. It does not read the file. |
-| `quorum` | `services` | Error lines after the last published result in the quorum log. |
+| `quorum` | `services` | Error lines after the last published result, in the log of each App installation. |
 
 ## Default reviewer models
 

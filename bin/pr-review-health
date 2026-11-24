@@ -138,20 +138,46 @@ check_updater() {
     fi
 }
 
-# The oldest pr-review-cron process of this user, in minutes, or nothing.
-# A job that cannot take the lock exits at once, so a long-running process holds a review.
-review_minutes() {
-    local pid oldest=""
-    local seconds
-    for pid in $(pgrep -u "$(id -u)" -f "$repo_dir/bin/pr-review-cron" 2>/dev/null); do
-        seconds=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
-        [[ -n "$seconds" ]] || continue
-        if [[ -z "$oldest" ]] || ((seconds > oldest)); then
-            oldest=$seconds
+# Succeed when a pr-review-cron process of this user runs.
+# A job that cannot take the lock exits at once, so a process that stays holds a run.
+runner_active() {
+    pgrep -u "$(id -u)" -f "$repo_dir/bin/pr-review-cron" >/dev/null 2>&1
+}
+
+# Print the minutes since the "[ISO time]" prefix of a log line, or nothing.
+minutes_since_stamp() {
+    local stamp seconds
+    stamp=$(sed -nE 's/^\[([^]]+)\].*/\1/p' <<<"$1")
+    [[ -n "$stamp" ]] || return 0
+    seconds=$(date -d "$stamp" +%s 2>/dev/null) || return 0
+    echo $(( ($(date +%s) - seconds) / 60 ))
+}
+
+# Judge a run that is still active.
+# One run reviews each queued pull request in turn, and each review has its own timeout.
+# The provider writes to a file, so the "reviewing" line stays the last log line during a review.
+# Outside a review, the runner polls, fetches, and confirms, and it writes the log often.
+check_active_run() {
+    local last_run="$1" age="$2"
+    local current target minutes
+    current=$(grep -v '^[[:space:]]*$' <<<"$last_run" | tail -n 1)
+    target=$(grep -oE '\] reviewing [^ ]+ at [0-9a-f]{7}' <<<"$current")
+    if [[ -z "$target" ]]; then
+        if ((age > max_idle_minutes)); then
+            report FAIL runner "run in progress has not written its log for $age minutes; the watcher, git, or gh may hang"
+        else
+            report OK runner "run in progress, last log write $age minutes ago"
         fi
-    done
-    if [[ -n "$oldest" ]]; then
-        echo $((oldest / 60))
+        return
+    fi
+
+    target="${target#\] }"
+    minutes=$(minutes_since_stamp "$current")
+    minutes="${minutes:-$age}"
+    if ((minutes > review_max_minutes)); then
+        report FAIL runner "review has run for $minutes minutes, longer than the timeout: $target"
+    else
+        report OK runner "review in progress for $minutes minutes: $target"
     fi
 }
 
@@ -162,21 +188,12 @@ check_runner() {
         return
     fi
 
-    local running age last_run error finished
-    running=$(review_minutes)
+    local age last_run error finished
     age=$(minutes_since_change "$log")
     last_run=$(lines_after_last ' watcher started$' "$log")
 
-    if [[ -n "$running" ]]; then
-        local target
-        target=$(grep -oE 'reviewing [^ ]+ at [0-9a-f]{7}' <<<"$last_run" | tail -n 1)
-        if [[ -z "$target" ]]; then
-            report OK runner "poll in progress"
-        elif ((running > review_max_minutes)); then
-            report FAIL runner "review has run for $running minutes, longer than the timeout: ${target:-unknown}"
-        else
-            report OK runner "review in progress for $running minutes: ${target:-unknown}"
-        fi
+    if runner_active; then
+        check_active_run "$last_run" "$age"
         return
     fi
 
@@ -185,15 +202,17 @@ check_runner() {
         return
     fi
 
+    # A fatal runner error stops the run before the "watcher finished" line.
+    # A failed review attempt also writes a "pr-review-cron:" line, but the run finishes.
     error=$(grep -E '^pr-review-cron: ' <<<"$last_run" | head -n 1)
     finished=$(grep -E ' watcher finished: ' <<<"$last_run" | tail -n 1)
-    if [[ -n "$error" ]]; then
-        report FAIL runner "$error"
-    elif [[ -z "$finished" ]]; then
-        report FAIL runner "the last run did not finish"
+    if [[ -z "$finished" ]]; then
+        report FAIL runner "${error:-the last run did not finish}"
     elif [[ "$finished" =~ ([0-9]+)\ failed,\ ([0-9]+)\ paused ]] &&
         ((BASH_REMATCH[1] > 0 || BASH_REMATCH[2] > 0)); then
-        report WARN runner "${finished#*] }"
+        report WARN runner "${finished#*] }${error:+; first error: ${error:0:160}}"
+    elif [[ -n "$error" ]]; then
+        report WARN runner "${finished#*] }; error: ${error:0:160}"
     else
         report OK runner "${finished#*] }"
     fi
@@ -262,12 +281,14 @@ check_cli() {
             ;;
     esac
 
-    # Cron runs the review with PR_REVIEW_PATH, so look up the program the same way.
+    # Look up the program with the PATH that pr-review-cron exports: ~/.local/bin, then PR_REVIEW_PATH.
+    # pr-review-cron also sources ~/.config/pr-review/provider.env, which can change PR_REVIEW_PATH.
+    # This check does not read that file, because it can hold tokens.
     local review_path="${PR_REVIEW_PATH//\$HOME/$HOME}"
-    review_path="${review_path:-$PATH}"
+    review_path="$HOME/.local/bin:${review_path:-$PATH}"
     local executable installed latest=""
     executable=$(PATH="$review_path" command -v "$command") || {
-        report FAIL cli "$command is not on PR_REVIEW_PATH ($review_path)"
+        report FAIL cli "$command is not on the review PATH ($review_path)"
         return
     }
     installed=$(PATH="$review_path" timeout 60 "$executable" --version 2>&1 |
@@ -293,11 +314,12 @@ check_cli() {
 }
 
 check_quorum() {
-    local config_file mode
+    local config_file config_name mode
     local -a config_list=()
     read -r -a config_list <<<"${QUORUM_CONFIG_FILES:-$QUORUM_CONFIG_FILE}"
     for config_file in "${config_list[@]}"; do
         config_file="${config_file//\$HOME/$HOME}"
+        config_name=$(basename -- "$config_file" .env)
         if [[ ! -f "$config_file" ]]; then
             report WARN config "$config_file does not exist; install.sh does not schedule it"
             continue
@@ -307,17 +329,24 @@ check_quorum() {
         if [[ "$mode" != 600 ]]; then
             report FAIL config "$config_file has mode $mode; run chmod 600 on it"
         else
-            report OK config "$(basename -- "$config_file") exists with mode 600"
+            report OK config "$config_name.env exists with mode 600"
         fi
+        check_quorum_log "$config_name"
     done
+}
+
+# Each App installation writes its own log (see install.sh).
+# A result from one installation must not hide an error from the other.
+check_quorum_log() {
+    local config_name="$1"
+    local log="$state_root/pr-review-quorum/$config_name.log"
+    if [[ ! -f "$log" ]]; then
+        report WARN quorum "$config_name: no log at $log"
+        return
+    fi
 
     # The quorum writes a JSON line when a result changes, and error lines on each failed run.
     # Its lines have no time, so use the time of the last write to judge old errors.
-    local log="$state_root/pr-review-quorum/cron.log"
-    if [[ ! -f "$log" ]]; then
-        report WARN quorum "no log at $log"
-        return
-    fi
     local age errors last_error
     age=$(minutes_since_change "$log")
     errors=$(lines_after_last '^[{]' "$log" | grep -cE '^pr-review-quorum: ')
@@ -325,14 +354,14 @@ check_quorum() {
         errors=$(grep -cE '^pr-review-quorum: ' "$log")
     fi
     if ((errors == 0)); then
-        report OK quorum "no errors after the last published result"
+        report OK quorum "$config_name: no errors after the last published result"
         return
     fi
     last_error=$(grep -E '^pr-review-quorum: ' "$log" | tail -n 1)
     if ((age <= max_idle_minutes)); then
-        report FAIL quorum "$errors error line(s) after the last result, last write $age minutes ago: $last_error"
+        report FAIL quorum "$config_name: $errors error line(s) after the last result, last write $age minutes ago: $last_error"
     else
-        report WARN quorum "$errors old error line(s), last write $age minutes ago: $last_error"
+        report WARN quorum "$config_name: $errors old error line(s), last write $age minutes ago: $last_error"
     fi
 }
 

@@ -84,7 +84,8 @@ render_cron_block() {
     local runner_cmd=""
 
     if [[ "$role" == "services" ]]; then
-        # One quorum pass per GitHub App installation, each with its own lock.
+        # One quorum pass per GitHub App installation, each with its own lock and log.
+        # Separate logs let bin/pr-review-health judge the errors of each installation.
         local config_files="${QUORUM_CONFIG_FILES:-$QUORUM_CONFIG_FILE}"
         local config_file config_name line
         local -a config_list=()
@@ -107,8 +108,8 @@ render_cron_block() {
                 printf 'install.sh: not scheduling %s: the file does not exist\n' "$config_file" >&2
                 continue
             fi
-            line=$(printf '%s /usr/bin/flock -n "$HOME/.cache/pr-review-quorum/%s.lock" /usr/bin/env QUORUM_CONFIG_FILE="%s" "%s/bin/pr-review-quorum" >>"$HOME/.local/state/pr-review-quorum/cron.log" 2>&1' \
-                "$PR_REVIEW_CRON_SCHEDULE" "$config_name" "$config_file" "$repo_dir")
+            line=$(printf '%s /usr/bin/flock -n "$HOME/.cache/pr-review-quorum/%s.lock" /usr/bin/env QUORUM_CONFIG_FILE="%s" "%s/bin/pr-review-quorum" >>"$HOME/.local/state/pr-review-quorum/%s.log" 2>&1' \
+                "$PR_REVIEW_CRON_SCHEDULE" "$config_name" "$config_file" "$repo_dir" "$config_name")
             runner_cmd+="${runner_cmd:+$'\n'}$line"
             update_lock+="${update_lock:+:}\$HOME/.cache/pr-review-quorum/$config_name.lock"
         done
