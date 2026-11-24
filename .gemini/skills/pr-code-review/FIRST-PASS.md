@@ -5,7 +5,7 @@ Use this branch for a `first-pass` review or a `rebased-re-review` after a force
 ## Steps
 
 1. Inspect the complete diff.
-   Run `git diff origin/<base>...HEAD` and read surrounding code for each changed file.
+   Run `git diff` with the primary diff range from the run context and read surrounding code for each changed file.
    Done when you inspect every changed hunk and each direct caller.
 2. Perform a separate defect-seeking pass.
    Work independently of the pull request description and existing CI results.

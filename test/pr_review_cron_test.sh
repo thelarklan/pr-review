@@ -333,6 +333,7 @@ expected_scratch="$home_dir/.local/share/pr-review/work/prs/owner__repository__p
 [[ "$(cat "$provider_head")" == "$repo_commit_a" ]] ||
     fail "worktree was not checked out at exact PR head"
 assert_arg_pair "$provider_args" --add-dir "$expected_worktree" "Codex --add-dir did not include PR worktree"
+assert_arg_pair "$provider_args" "$expected_worktree" -- "Codex prompt separator missing"
 assert_arg_pair "$provider_args" --model gpt-6.2-sol "Codex model was not pinned to gpt-6.2-sol"
 assert_arg_pair "$provider_args" --config 'model_reasoning_effort="high"' \
     "Codex reasoning effort was not pinned"
@@ -350,6 +351,8 @@ grep -Fq 'not as the default outcome' "$provider_args" ||
 if grep -Fqx 'name: pr-code-review' "$provider_args"; then
     fail "YAML frontmatter leaked into inlined review prompt"
 fi
+
+sed -i 's/^102/101/' "$(dirname "$expected_worktree")/review-baseline"
 
 # 2. Delta re-review after push-dismissed APPROVED: cleans dirty worktree, advances to commit_b, passes delta range.
 git -C "$remotes_root/owner/repository.git" update-ref refs/pull/7/head "$repo_commit_b"
@@ -378,12 +381,59 @@ PROVIDER_HEAD_FILE="$provider_head" \
 
 [[ ! -e "$expected_worktree/leftover.tmp" ]] || fail "worktree was not cleaned before re-review"
 [[ "$(cat "$provider_head")" == "$repo_commit_b" ]] || fail "worktree did not advance to commit_b"
-grep -Fq 'Review mode: delta-re-review' "$provider_args" || fail "push-dismissed approval did not enter delta-re-review"
+grep -Fq 'Review mode: delta-re-review' "$provider_args" || fail "matching baseline did not enter delta review"
 grep -Fq '# Delta re-review' "$provider_args" || fail "DELTA-REVIEW.md branch was not inlined"
 grep -Fq "Primary diff range: $repo_commit_a..$repo_commit_b" "$provider_args" ||
     fail "delta diff range was not passed"
 grep -Fq 'state=APPROVED (dismissed on push)' "$provider_args" ||
     fail "prior push-dismissed approval context was missing"
+
+# A comment is not evidence of a completed review.
+rm -- "$review_marker"
+HOME="$home_dir" \
+PATH="$fake_bin:/usr/local/bin:/usr/bin:/bin" \
+PR_REVIEW_PROVIDER=codex \
+PR_REVIEW_PATH="$fake_bin:$toolchain_bin:/usr/local/bin:/usr/bin:/bin" \
+PR_REVIEW_WATCH_BIN="$fake_bin/pr-watch" \
+PR_REVIEW_CODEX_BIN="$fake_bin/codex" \
+PR_REVIEW_GIT_BASE_URL="file://$remotes_root" \
+PR_REVIEW_TIMEOUT=5s \
+PR_WATCH_ITEM=owner/repository#7 \
+PR_WATCH_RECORD_STATE=0 \
+PR_META_FILE="$pr_meta_file" \
+ACTIVE_HEAD_SHA="$repo_commit_b" \
+BEFORE_REVIEWS_TSV="$(printf '101\t%s\t2026-08-26T10:00:00Z\tCOMMENTED' "$repo_commit_a")" \
+TIMELINE_DISMISSED_TSV="$(printf 'approved\t%s' "$repo_commit_b")" \
+REVIEW_SUBMITTED="$review_marker" \
+PROVIDER_ARGS="$provider_args" \
+PROVIDER_HEAD_FILE="$provider_head" \
+    "$project_dir/bin/pr-review-cron"
+grep -Fq 'Review mode: first-pass' "$provider_args" || fail "comment-only baseline entered delta mode"
+
+# A changed base invalidates the recorded review baseline.
+printf '101\tother-base\t%s\n' "$(git -C "$expected_worktree" merge-base refs/remotes/origin/main "$repo_commit_b")" >"$(dirname "$expected_worktree")/review-baseline"
+rm -- "$review_marker"
+HOME="$home_dir" \
+PATH="$fake_bin:/usr/local/bin:/usr/bin:/bin" \
+PR_REVIEW_PROVIDER=codex \
+PR_REVIEW_PATH="$fake_bin:$toolchain_bin:/usr/local/bin:/usr/bin:/bin" \
+PR_REVIEW_WATCH_BIN="$fake_bin/pr-watch" \
+PR_REVIEW_CODEX_BIN="$fake_bin/codex" \
+PR_REVIEW_GIT_BASE_URL="file://$remotes_root" \
+PR_REVIEW_TIMEOUT=5s \
+PR_WATCH_ITEM=owner/repository#7 \
+PR_WATCH_RECORD_STATE=0 \
+PR_META_FILE="$pr_meta_file" \
+ACTIVE_HEAD_SHA="$repo_commit_b" \
+BEFORE_REVIEWS_TSV="$(printf '101\t%s\t2026-08-26T10:00:00Z\tAPPROVED' "$repo_commit_a")" \
+TIMELINE_DISMISSED_TSV="$(printf 'approved\t%s' "$repo_commit_b")" \
+REVIEW_SUBMITTED="$review_marker" \
+PROVIDER_ARGS="$provider_args" \
+PROVIDER_HEAD_FILE="$provider_head" \
+    "$project_dir/bin/pr-review-cron"
+grep -Fq 'Review mode: first-pass' "$provider_args" || fail "changed base entered delta mode"
+
+sed -i 's/^102/101/' "$(dirname "$expected_worktree")/review-baseline"
 
 # 3. Rebased (force-pushed) PR falls back to rebased-re-review + FIRST-PASS.md.
 git -C "$remotes_root/owner/repository.git" update-ref refs/pull/7/head "$repo_commit_c"
@@ -488,7 +538,8 @@ assert_arg_pair "$provider_args" --model claude-opus-5-5 "Claude model was not p
 assert_arg_pair "$provider_args" --effort high "Claude effort was not pinned"
 assert_arg_pair "$provider_args" --add-dir \
     "$home_dir/.local/share/pr-review/work/prs/owner__claude__pr-8/repo" \
-    "Claude --add-dir did not include PR scratch"
+    "Claude --add-dir did not include PR worktree"
+assert_arg_pair "$provider_args" "$home_dir/.local/share/pr-review/work/prs/owner__claude__pr-8/repo" -- "Claude prompt separator missing"
 [[ "$(cat "$token_capture")" == "secret-oauth-value" ]] ||
     fail "provider env file did not supply CLAUDE_CODE_OAUTH_TOKEN"
 if grep -Fq 'secret-oauth-value' "$home_dir/.local/state/pr-review/cron.log"; then
