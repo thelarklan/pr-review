@@ -347,7 +347,7 @@ prepare_pr_worktree() {
     fi
 
     if ! git -C "$bare_repo" "${git_auth_args[@]}" fetch --no-tags "$remote_url" \
-        "+refs/heads/$base_ref:refs/remotes/origin/$base_ref" \
+        "+refs/heads/$base_ref:refs/pr-review/bases/$number" \
         "+refs/pull/$number/head:refs/pr-review/heads/$number" >&2; then
         return 1
     fi
@@ -422,6 +422,7 @@ cleanup_closed_pr_worktrees() {
                     git -C "$meta_bare_repo" worktree remove --force "$entry/repo" >/dev/null 2>&1 || true
                     git -C "$meta_bare_repo" worktree prune >/dev/null 2>&1 || true
                     git -C "$meta_bare_repo" update-ref -d "refs/pr-review/heads/$meta_number" >/dev/null 2>&1 || true
+                    git -C "$meta_bare_repo" update-ref -d "refs/pr-review/bases/$meta_number" >/dev/null 2>&1 || true
                 fi
                 rm -rf -- "$entry"
                 printf '[%s] cleaned up %s PR workspace %s#%s\n' \
@@ -680,10 +681,10 @@ while IFS= read -r item; do
 
     review_mode="first-pass"
     branch_body="$skill_first_pass_body"
-    diff_range="refs/remotes/origin/$base_ref...$current_head"
+    diff_range="refs/pr-review/bases/$number...$current_head"
     delta_summary=""
     baseline_file="$(dirname -- "$pr_worktree")/review-baseline"
-    merge_base=$(git -C "$pr_worktree" merge-base "refs/remotes/origin/$base_ref" "$current_head" || true)
+    merge_base=$(git -C "$pr_worktree" merge-base "refs/pr-review/bases/$number" "$current_head" || true)
     baseline_id="" baseline_ref="" baseline_merge_base=""
     if [[ -f "$baseline_file" ]]; then
         IFS=$'\t' read -r baseline_id baseline_ref baseline_merge_base <"$baseline_file" || true
@@ -696,7 +697,7 @@ while IFS= read -r item; do
         if [[ "$prior_review_commit" == "$current_head" ]]; then
             review_mode="same-head-followup"
             branch_body="$skill_delta_body"
-            diff_range="refs/remotes/origin/$base_ref...$current_head"
+            diff_range="refs/pr-review/bases/$number...$current_head"
         elif git -C "$pr_worktree" cat-file -e "${prior_review_commit}^{commit}" 2>/dev/null &&
             git -C "$pr_worktree" merge-base --is-ancestor "$prior_review_commit" "$current_head" 2>/dev/null; then
             review_mode="delta-re-review"
@@ -709,7 +710,7 @@ while IFS= read -r item; do
         else
             review_mode="rebased-re-review"
             branch_body="$skill_first_pass_body"
-            diff_range="refs/remotes/origin/$base_ref...$current_head"
+            diff_range="refs/pr-review/bases/$number...$current_head"
         fi
     fi
     if [[ -z "$delta_summary" ]]; then

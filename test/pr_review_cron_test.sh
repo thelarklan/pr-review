@@ -411,7 +411,7 @@ PROVIDER_HEAD_FILE="$provider_head" \
 grep -Fq 'Review mode: first-pass' "$provider_args" || fail "comment-only baseline entered delta mode"
 
 # A changed base invalidates the recorded review baseline.
-printf '101\tother-base\t%s\n' "$(git -C "$expected_worktree" merge-base refs/remotes/origin/main "$repo_commit_b")" >"$(dirname "$expected_worktree")/review-baseline"
+printf '101\tother-base\t%s\n' "$(git -C "$expected_worktree" merge-base refs/pr-review/bases/7 "$repo_commit_b")" >"$(dirname "$expected_worktree")/review-baseline"
 rm -- "$review_marker"
 HOME="$home_dir" \
 PATH="$fake_bin:/usr/local/bin:/usr/bin:/bin" \
@@ -459,6 +459,40 @@ PROVIDER_ARGS="$provider_args" \
 
 grep -Fq 'Review mode: rebased-re-review' "$provider_args" || fail "force-pushed PR did not fall back to rebased-re-review"
 grep -Fq '# First-pass review' "$provider_args" || fail "rebased-re-review did not inline FIRST-PASS.md"
+
+# 3b. A base branch renamed to a nested name still prepares the worktree.
+# Simulate a stale ref from an older cache that blocks refs/remotes/origin/main/v2.
+bare_cache="$home_dir/.local/share/pr-review/work/repos/owner/repository.git"
+git -C "$bare_cache" update-ref refs/remotes/origin/main "$repo_base_sha"
+git -C "$remotes_root/owner/repository.git" update-ref -d refs/heads/main
+git -C "$remotes_root/owner/repository.git" update-ref refs/heads/main/v2 "$repo_base_sha"
+sed -i 's|^\(owner/repository#7\t[^\t]*\t\)main\t|\1main/v2\t|' "$pr_meta_file"
+rm -- "$review_marker"
+
+HOME="$home_dir" \
+PATH="$fake_bin:/usr/local/bin:/usr/bin:/bin" \
+PR_REVIEW_PROVIDER=codex \
+PR_REVIEW_PATH="$fake_bin:$toolchain_bin:/usr/local/bin:/usr/bin:/bin" \
+PR_REVIEW_WATCH_BIN="$fake_bin/pr-watch" \
+PR_REVIEW_CODEX_BIN="$fake_bin/codex" \
+PR_REVIEW_GIT_BASE_URL="file://$remotes_root" \
+PR_REVIEW_TIMEOUT=5s \
+PR_WATCH_ITEM=owner/repository#7 \
+PR_WATCH_RECORD_STATE=0 \
+PR_META_FILE="$pr_meta_file" \
+ACTIVE_HEAD_SHA="$repo_commit_c" \
+BEFORE_REVIEWS_TSV="$(printf '101\t%s\t2026-08-26T11:00:00Z\tAPPROVED' "$repo_commit_b")" \
+REVIEW_SUBMITTED="$review_marker" \
+PROVIDER_ARGS="$provider_args" \
+    "$project_dir/bin/pr-review-cron"
+
+[[ -e "$review_marker" ]] || fail "renamed nested base branch blocked the review"
+[[ "$(git -C "$bare_cache" rev-parse refs/pr-review/bases/7)" == "$repo_base_sha" ]] ||
+    fail "base was not fetched into the per-PR base ref"
+
+git -C "$remotes_root/owner/repository.git" update-ref -d refs/heads/main/v2
+git -C "$remotes_root/owner/repository.git" update-ref refs/heads/main "$repo_base_sha"
+sed -i 's|^\(owner/repository#7\t[^\t]*\t\)main/v2\t|\1main\t|' "$pr_meta_file"
 
 # 4. Head moved during fetch aborts before starting provider.
 git -C "$remotes_root/owner/repository.git" update-ref refs/pull/7/head "$repo_commit_a"
@@ -621,6 +655,9 @@ PR_META_FILE="$pr_meta_file" \
     fail "bare repo cache was wrongly removed during PR cleanup"
 grep -Fq 'cleaned up MERGED PR workspace owner/repository#7' \
     "$home_dir/.local/state/pr-review/cron.log" || fail "cleanup action was not logged"
+! git -C "$home_dir/.local/share/pr-review/work/repos/owner/repository.git" \
+    rev-parse -q --verify refs/pr-review/bases/7 >/dev/null ||
+    fail "cleanup did not remove the per-PR base ref"
 
 # 8. Batch continues past preparation query failure.
 rm -- "$review_marker"
