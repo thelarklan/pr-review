@@ -213,6 +213,8 @@ fi
 tmp_crontab=$(mktemp)
 trap 'rm -f -- "$tmp_crontab"' EXIT
 
+# Render the block once. The schedule files below must match the block that cron gets.
+cron_block=$(render_cron_block)
 {
     if [[ -n "$header_lines" ]]; then
         printf '%s' "$header_lines"
@@ -220,7 +222,7 @@ trap 'rm -f -- "$tmp_crontab"' EXIT
     if [[ -n "$cleaned_crontab" ]]; then
         printf '%s\n' "$cleaned_crontab"
     fi
-    render_cron_block
+    printf '%s\n' "$cron_block"
 } >"$tmp_crontab"
 
 crontab "$tmp_crontab"
@@ -232,6 +234,6 @@ if [[ "$role" == "services" ]]; then
         scheduled_file="${status_path/\$HOME/$HOME}"
         scheduled_file="${scheduled_file%.status}.scheduled"
         [[ -e "$scheduled_file" ]] || : >"$scheduled_file"
-    done < <(render_cron_block 2>/dev/null | grep -oE 'QUORUM_STATUS_FILE="[^"]+"' | cut -d'"' -f2)
+    done < <(grep -oE 'QUORUM_STATUS_FILE="[^"]+"' <<<"$cron_block" | cut -d'"' -f2)
 fi
 printf 'Installed pr-review %s schedule from %s\n' "$role" "$repo_dir"

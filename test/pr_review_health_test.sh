@@ -440,6 +440,13 @@ if run_health --role services; then
 fi
 assert_contains "$output" 'FAIL quorum    thelarklanlabs: the crontab does not schedule this config' \
     "a missing scheduled poll was not reported"
+# A quorum job that is commented out inside the managed block is not scheduled.
+sed 's|^\(.*thelarklanlabs.env.*/bin/pr-review-quorum".*\)$|  # \1|' "$test_dir/crontab.services.good" >"$services_crontab"
+if run_health --role services; then
+    fail "a commented-out quorum job must fail"
+fi
+assert_contains "$output" 'FAIL quorum    thelarklanlabs: the crontab does not schedule this config' \
+    "a commented-out quorum job was counted as scheduled"
 cp "$test_dir/crontab.services.good" "$services_crontab"
 
 # One missing config only warns. When no configured config exists, the check fails.

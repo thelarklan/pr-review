@@ -360,6 +360,7 @@ check_quorum_poll() {
     # Search only the quorum commands inside the managed block.
     cron_line=$(crontab -l 2>/dev/null |
         awk '/^# BEGIN pr-review$/ { on = 1; next } /^# END pr-review$/ { on = 0 } on' |
+        grep -v '^[[:space:]]*#' |
         grep -F '/bin/pr-review-quorum"' |
         grep -F "QUORUM_CONFIG_FILE=\"$config_entry\"" |
         head -n 1)

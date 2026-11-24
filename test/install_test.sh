@@ -168,6 +168,26 @@ PATH="$fake_bin:$PATH" HOME="$services_home" "$install_dir/install.sh" --role se
 [[ -f "$services_home/.local/state/pr-review-quorum/thelarklanlabs.scheduled" ]] ||
     fail "the managed schedule file was not written"
 [[ ! -e "$services_home/absent-dir" ]] || fail "a preserved crontab line created a schedule file"
+# Write the schedule files from the block that was installed, even when a config moves after the install.
+moving_bin="$test_dir/moving-bin"
+mkdir -p "$moving_bin"
+cat >"$moving_bin/crontab" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "-l" ]]; then
+    exit 1
+fi
+cat -- "\$1" >"$test_dir/crontab.moving"
+mv "\$HOME/.config/pr-review/thelarklanlabs.env" "$test_dir/thelarklanlabs.env.moved"
+EOF
+chmod +x "$moving_bin/crontab"
+rm -f "$services_home/.local/state/pr-review-quorum/"*.scheduled
+PATH="$moving_bin:$PATH" HOME="$services_home" "$install_dir/install.sh" --role services >/dev/null ||
+    fail "the services install with a moving config failed"
+mv "$test_dir/thelarklanlabs.env.moved" "$services_home/.config/pr-review/thelarklanlabs.env"
+grep -Fq 'QUORUM_CONFIG_FILE="$HOME/.config/pr-review/thelarklanlabs.env"' "$test_dir/crontab.moving" ||
+    fail "the installed crontab is missing the organization job"
+[[ -f "$services_home/.local/state/pr-review-quorum/thelarklanlabs.scheduled" ]] ||
+    fail "an installed job has no schedule file"
 
 if "$install_dir/install.sh" --role unknown >/dev/null 2>&1; then
     fail "invalid role succeeded"
