@@ -16,6 +16,7 @@ This public repository owns the automated pull-request review bots and the `bot-
 - `bin/pr-watch`: Finds open pull requests that need review or follow-up by the authenticated account.
 - `bin/pr-review-cron`: Runs `bin/pr-watch`, invokes Codex, Claude, or Antigravity, confirms review submission, and emits health alerts.
 - `bin/pr-review-update`: Verifies `origin/main` in a temporary export, then fast-forwards the role clone and updates the role crontab.
+- `bin/pr-review-health`: Reports the health of one host role. `scripts/check-hosts.sh` runs it on each WSL host.
 - `hosts/*.env` and `install.sh`: Configure non-colliding schedules per host role (`codex`, `claude`, `gemini`, `services`).
 - `docs/review-quorum.md`: Runbook for the GitHub App deployment on `services`.
 - `docs/recreate.md`: Rebuild the App, the rulesets, and every host from this repository.

@@ -141,6 +141,10 @@ Run these steps on `codex`, `claude`, and `gemini`.
    bash ~/projects/repos/pr-review/install.sh --role ROLE
    ```
 
+4. Wait for the first updater run at minute 19 of the hour.
+5. Run `bash ~/projects/repos/pr-review/bin/pr-review-health --role ROLE`.
+   Continue only when no line starts with `FAIL`.
+
 ## 4. Move a repository into the organization
 
 Do these steps without a pause.

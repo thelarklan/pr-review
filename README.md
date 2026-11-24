@@ -15,11 +15,13 @@ The cohort contains four accounts: `thelarklan`, `larkbot-codex`, `larkbot-claud
 - `bin/pr-watch`: Queries open pull requests awaiting review, readiness follow-ups, or conversation replies.
 - `bin/pr-review-cron`: Invokes the configured AI reviewer CLI, verifies review posting, and manages health alert issues.
 - `bin/pr-review-update`: Fast-forwards the repository clone from `origin/main` and runs verification.
+- `bin/pr-review-health`: Reports the health of one host role. It only reads state.
 - `hosts/`: Per-role environment configuration (`codex`, `claude`, `gemini`, `services`).
 - `install.sh`: Prepares directories and installs the managed crontab block for a selected role.
 - `github/`: The GitHub App manifest and the repository ruleset template.
 - `scripts/create-app.sh`: Creates the GitHub App from the manifest and writes its private config.
 - `scripts/enroll-repo.sh`: Applies merge settings, bot access, and the ruleset to one repository.
+- `scripts/check-hosts.sh`: Runs `bin/pr-review-health` on each WSL host and lists open `[bot-health]` issues.
 - `docs/recreate.md`: Rebuilds the whole system from this repository.
 
 ## Install a host role
@@ -53,6 +55,32 @@ All roles run `bin/pr-review-update` hourly at minute `19` (`19 * * * *`).
 The updater shares the review lock and waits up to 50 minutes for a running review to finish.
 It verifies each new commit in a temporary export before it moves the live clone.
 A failed verification leaves the live clone and crontab unchanged.
+
+## Check host health
+
+Run this command from Windows (Git Bash) or from a WSL distribution with Windows interop:
+
+```bash
+bash scripts/check-hosts.sh            # services, codex, claude, gemini
+bash scripts/check-hosts.sh codex=other-distro --no-latest
+```
+
+Each host runs the `bin/pr-review-health` copy from your clone, so a host with an old clone still gets the current checks.
+On one host, run `bin/pr-review-health`. It finds the role in the crontab, or you can give `--role ROLE`.
+
+Each line starts with `OK`, `WARN`, or `FAIL`. The command exits `1` when a line is `FAIL` or a `[bot-health]` issue is open.
+
+| Check | Roles | What it reports |
+| --- | --- | --- |
+| `clone` | all | The clone commit compared with `main`, the branch, and local changes. |
+| `crontab` | all | The `pr-review` block compared with `install.sh --print-crontab`, and old review entries. |
+| `updater` | all | The last result of `bin/pr-review-update`, and a run in the last 2 hours. |
+| `runner` | bots | A review in progress, a run in the last 10 minutes, and the counts of the last run. |
+| `failures` | bots | Paused and retrying pull requests in `provider-failures`. |
+| `github` | bots | The `gh` login compared with the bot account. |
+| `cli` | bots | The AI CLI version compared with the latest npm release. `agy` has no release feed. |
+| `config` | `services` | Each quorum config exists with mode `600`. It does not read the file. |
+| `quorum` | `services` | Error lines after the last published result in the quorum log. |
 
 ## Default reviewer models
 

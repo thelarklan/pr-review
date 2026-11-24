@@ -1,0 +1,291 @@
+#!/usr/bin/env bash
+# Crontab text keeps $HOME literal, as install.sh writes it.
+# shellcheck disable=SC2016
+set -euo pipefail
+
+project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+test_dir=$(mktemp -d)
+review_pid=""
+cleanup() {
+    if [[ -n "$review_pid" ]]; then
+        pkill -P "$review_pid" 2>/dev/null || true
+        kill "$review_pid" 2>/dev/null || true
+    fi
+    rm -rf -- "$test_dir"
+}
+trap cleanup EXIT
+
+fail() {
+    printf 'FAIL: %s\n' "$*" >&2
+    exit 1
+}
+
+assert_contains() {
+    local haystack="$1" needle="$2" message="$3"
+    if [[ "$haystack" != *"$needle"* ]]; then
+        printf '%s\n' "$haystack" >&2
+        fail "$message"
+    fi
+}
+
+assert_not_contains() {
+    local haystack="$1" needle="$2" message="$3"
+    if [[ "$haystack" == *"$needle"* ]]; then
+        printf '%s\n' "$haystack" >&2
+        fail "$message"
+    fi
+}
+
+home_dir="$test_dir/home"
+state_dir="$home_dir/.local/state"
+fake_bin="$test_dir/bin"
+mkdir -p "$home_dir" "$fake_bin" \
+    "$state_dir/pr-review" "$state_dir/pr-review-update" "$state_dir/pr-review-quorum"
+
+# The fixture clone has an https origin, so install.sh accepts it.
+# The health check reads main from a local bare repository instead.
+upstream="$test_dir/upstream.git"
+clone="$test_dir/clone"
+git init -q --bare "$upstream"
+git init -q -b main "$clone"
+cp -R "$project_dir/install.sh" "$project_dir/hosts" "$project_dir/bin" "$clone/"
+sed -i "s|^PR_REVIEW_PATH=.*|PR_REVIEW_PATH='$fake_bin:/usr/bin:/bin'|" "$clone/hosts/codex.env"
+git -C "$clone" add -A
+git -C "$clone" -c user.name=test -c user.email=test@example.invalid commit -q -m fixture
+git -C "$clone" push -q "$upstream" main
+git -C "$clone" remote add origin https://github.com/thelarklanlabs/pr-review.git
+
+cat >"$fake_bin/crontab" <<'EOF'
+#!/usr/bin/env bash
+[[ "$1" == "-l" ]] || exit 1
+cat "$FAKE_CRONTAB"
+EOF
+cat >"$fake_bin/gh" <<'EOF'
+#!/usr/bin/env bash
+# Read stdin, as some real programs do, to prove that the health check keeps its script away from children.
+cat >/dev/null
+case "$1 $2" in
+    "api user")
+        [[ -n "${FAKE_GH_LOGIN:-}" ]] || exit 1
+        printf '%s\n' "$FAKE_GH_LOGIN"
+        ;;
+    "issue list")
+        printf '%s' "${FAKE_GH_ISSUES:-}"
+        ;;
+    *) exit 1 ;;
+esac
+EOF
+cat >"$fake_bin/npm" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$FAKE_NPM_LATEST"
+EOF
+cat >"$fake_bin/codex" <<'EOF'
+#!/usr/bin/env bash
+printf 'codex-cli 0.171.0\n'
+EOF
+chmod +x "$fake_bin"/*
+
+export HOME="$home_dir"
+export XDG_STATE_HOME="$state_dir"
+export PATH="$fake_bin:/usr/bin:/bin"
+export PR_REVIEW_HEALTH_REPO="$clone"
+export PR_REVIEW_HEALTH_UPSTREAM="$upstream"
+export FAKE_CRONTAB="$test_dir/crontab.txt"
+export FAKE_GH_LOGIN=larkbot-codex
+export FAKE_NPM_LATEST=0.171.0
+
+{
+    printf 'SHELL=/bin/bash\n'
+    bash "$clone/install.sh" --role codex --print-crontab
+} >"$FAKE_CRONTAB"
+
+updater_log="$state_dir/pr-review-update/cron.log"
+runner_log="$state_dir/pr-review/cron.log"
+failure_file="$state_dir/pr-review/provider-failures"
+printf '\n[2026-11-23T19:19:01-07:00] updater started\n[2026-11-23T19:19:03-07:00] already at verified commit abc\n' >"$updater_log"
+write_clean_run() {
+    printf '\n[2026-11-23T19:40:05-07:00] codex watcher started\npr-watch: checked 1 open PR(s)\n[2026-11-23T19:40:09-07:00] codex watcher finished: 0 confirmed, 0 failed, 0 paused\n' >"$runner_log"
+}
+write_clean_run
+: >"$failure_file"
+
+run_health() {
+    local status=0
+    output=$(bash "$clone/bin/pr-review-health" "$@" 2>&1) || status=$?
+    return "$status"
+}
+
+# 1. A healthy codex host passes, and the role comes from the crontab.
+run_health || fail "healthy host must pass: $output"
+assert_contains "$output" 'pr-review-health: codex as' "role was not read from the crontab"
+assert_contains "$output" 'OK   clone     at' "clone at main must pass"
+assert_contains "$output" 'same as main' "clone must match main"
+assert_contains "$output" 'OK   crontab   pr-review block matches' "crontab block must match"
+assert_contains "$output" 'OK   updater' "updater must pass"
+assert_contains "$output" 'OK   runner    codex watcher finished: 0 confirmed' "runner must pass"
+assert_contains "$output" 'OK   failures  no failed review attempts' "failures must pass"
+assert_contains "$output" 'OK   github    signed in as larkbot-codex' "github login must pass"
+assert_contains "$output" 'OK   cli       codex 0.171.0 (latest)' "cli version must pass"
+assert_not_contains "$output" 'WARN' "healthy host has a warning"
+
+# 2. The script works when it arrives on stdin, as scripts/check-hosts.sh sends it.
+status=0
+output=$(bash -s -- --role codex <"$clone/bin/pr-review-health" 2>&1) || status=$?
+((status == 0)) || fail "piped health check must pass: $output"
+assert_contains "$output" 'OK   cli       codex 0.171.0 (latest)' "a child read the piped script"
+assert_contains "$output" 'codex: 0 failure(s), 0 warning(s)' "piped summary mismatch"
+
+# 3. An older CLI is a warning, not a failure.
+FAKE_NPM_LATEST=0.172.0 run_health || fail "an old CLI must not fail the host"
+assert_contains "$output" 'WARN cli       codex 0.171.0, latest is 0.172.0' "old CLI was not reported"
+FAKE_NPM_LATEST=0.170.9 run_health || fail "a newer CLI must pass"
+assert_contains "$output" 'OK   cli       codex 0.171.0 (latest)' "a newer CLI than the release is current"
+FAKE_NPM_LATEST=0.172.0 run_health --no-latest || fail "--no-latest must pass"
+assert_contains "$output" 'OK   cli       codex 0.171.0' "--no-latest must skip the release check"
+
+# 4. A runner that has not written for a long time fails.
+touch -d '30 minutes ago' "$runner_log"
+if run_health; then
+    fail "an idle runner must fail"
+fi
+assert_contains "$output" 'FAIL runner    no run for 30 minutes' "idle runner was not reported"
+write_clean_run
+
+# 5. An error in the last run fails, and a failed review is a warning.
+printf '\n[2026-11-23T19:41:01-07:00] codex watcher started\npr-review-cron: authenticated as someone, expected larkbot-codex\n' >>"$runner_log"
+if run_health; then
+    fail "a runner error must fail"
+fi
+assert_contains "$output" 'FAIL runner    pr-review-cron: authenticated as someone' "runner error was not reported"
+printf '\n[2026-11-23T19:42:01-07:00] codex watcher started\n[2026-11-23T19:42:09-07:00] codex watcher finished: 0 confirmed, 1 failed, 0 paused\n' >>"$runner_log"
+run_health || fail "a failed review attempt must only warn"
+assert_contains "$output" 'WARN runner    codex watcher finished: 0 confirmed, 1 failed, 0 paused' "failed review was not reported"
+write_clean_run
+
+# 6. A review in progress passes, even when the log is old.
+# A process whose command line names bin/pr-review-cron stands in for the review.
+# The ": done" keeps bash from replacing itself with sleep.
+bash -c 'sleep 300; : done' "$clone/bin/pr-review-cron" &
+review_pid=$!
+printf '\n[2026-11-23T19:43:01-07:00] codex watcher started\n[2026-11-23T19:43:05-07:00] reviewing thelarklanlabs/example#7 at 64cf1701234\n' >>"$runner_log"
+touch -d '20 minutes ago' "$runner_log"
+run_health || fail "a review in progress must pass: $output"
+assert_contains "$output" 'OK   runner    review in progress for 0 minutes: reviewing thelarklanlabs/example#7 at 64cf170' \
+    "review in progress was not reported"
+pkill -P "$review_pid" || true
+kill "$review_pid"
+wait "$review_pid" 2>/dev/null || true
+review_pid=""
+write_clean_run
+
+# 7. Paused and retrying pull requests are warnings.
+printf 'thelarklanlabs/example#7 64cf1701234 3\nthelarklanlabs/example#8 aaaaaaa1111 1\n' >"$failure_file"
+run_health || fail "failure records must only warn"
+assert_contains "$output" 'WARN failures  paused after 3 failed attempts: thelarklanlabs/example#7@64cf170' "paused review missing"
+assert_contains "$output" 'WARN failures  1 pull request(s) with failed attempts that will retry' "retry count missing"
+: >"$failure_file"
+
+# 8. A wrong or missing GitHub login fails.
+if FAKE_GH_LOGIN=someone run_health; then
+    fail "a wrong login must fail"
+fi
+assert_contains "$output" 'FAIL github    signed in as someone, expected larkbot-codex' "wrong login was not reported"
+if FAKE_GH_LOGIN="" run_health; then
+    fail "a missing login must fail"
+fi
+assert_contains "$output" 'FAIL github    gh cannot read the signed-in account' "missing login was not reported"
+
+# 9. Crontab problems.
+cp "$FAKE_CRONTAB" "$test_dir/crontab.good"
+sed -i 's/PR_REVIEW_CODEX_EFFORT=medium/PR_REVIEW_CODEX_EFFORT=high/' "$FAKE_CRONTAB"
+printf '* * * * * $HOME/.local/bin/pr-review-cron\n' >>"$FAKE_CRONTAB"
+run_health --role codex || fail "crontab drift must only warn"
+assert_contains "$output" 'WARN crontab   pr-review block differs from install.sh output' "drift was not reported"
+assert_contains "$output" 'WARN crontab   old review entry outside the pr-review block' "old entry was not reported"
+printf 'SHELL=/bin/bash\n' >"$FAKE_CRONTAB"
+if run_health --role codex; then
+    fail "a missing cron block must fail"
+fi
+assert_contains "$output" 'FAIL crontab   no pr-review block; run install.sh --role codex' "missing block was not reported"
+if run_health; then
+    fail "a missing role must fail"
+fi
+assert_contains "$output" 'cannot find the role; pass --role' "missing role was not reported"
+cp "$test_dir/crontab.good" "$FAKE_CRONTAB"
+
+# 10. A clone behind main and a stopped updater.
+git -C "$clone" -c user.name=test -c user.email=test@example.invalid commit -q --allow-empty -m newer
+git -C "$clone" push -q "$upstream" main
+git -C "$clone" reset -q --hard HEAD~1
+run_health || fail "a clone behind main must only warn"
+assert_contains "$output" 'main is ' "clone behind main was not reported"
+assert_contains "$output" 'WARN clone' "clone behind main must warn"
+printf 'leftover\n' >"$clone/extra.txt"
+if run_health; then
+    fail "local changes must fail"
+fi
+assert_contains "$output" 'FAIL clone     has local changes' "local changes were not reported"
+rm -f "$clone/extra.txt"
+printf 'pr-review-update: verification failed for abc; source stays at def\n' >>"$updater_log"
+if run_health; then
+    fail "an updater error must fail"
+fi
+assert_contains "$output" 'FAIL updater   pr-review-update: verification failed' "updater error was not reported"
+touch -d '3 hours ago' "$updater_log"
+if run_health; then
+    fail "an old updater log must fail"
+fi
+assert_contains "$output" 'FAIL updater   no run for 180 minutes' "stopped updater was not reported"
+printf '\n[2026-11-23T20:19:01-07:00] updater started\n[2026-11-23T20:19:03-07:00] already at verified commit abc\n' >"$updater_log"
+
+# 11. The services role checks the config mode and the quorum log.
+mkdir -p "$home_dir/.config/pr-review"
+touch "$home_dir/.config/pr-review/pr-review-quorum.env" "$home_dir/.config/pr-review/thelarklanlabs.env"
+chmod 600 "$home_dir/.config/pr-review/pr-review-quorum.env"
+chmod 644 "$home_dir/.config/pr-review/thelarklanlabs.env"
+quorum_log="$state_dir/pr-review-quorum/cron.log"
+printf 'pr-review-quorum: could not list open pull requests for a/b\n{"repository":"a/b","pull":1}\n' >"$quorum_log"
+run_health --role services --no-latest || true
+assert_contains "$output" 'OK   config    pr-review-quorum.env exists with mode 600' "good config mode missing"
+assert_contains "$output" 'thelarklanlabs.env has mode 644; run chmod 600 on it' "bad config mode missing"
+assert_contains "$output" 'OK   quorum    no errors after the last published result' "old errors before a result must pass"
+assert_not_contains "$output" 'runner' "services must not check a review runner"
+chmod 600 "$home_dir/.config/pr-review/thelarklanlabs.env"
+printf 'curl: (22) The requested URL returned error: 403\npr-review-quorum: could not list open pull requests for a/c\n' >>"$quorum_log"
+if run_health --role services; then
+    fail "current quorum errors must fail"
+fi
+assert_contains "$output" 'FAIL quorum    1 error line(s) after the last result' "current quorum error was not reported"
+touch -d '1 hour ago' "$quorum_log"
+run_health --role services || fail "old quorum errors must only warn: $output"
+assert_contains "$output" 'WARN quorum    1 old error line(s), last write 60 minutes ago' "old quorum error was not reported"
+
+# 12. scripts/check-hosts.sh runs the check through wsl.exe and lists health issues.
+# Each call gets /dev/null as stdin, because the fake gh reads stdin.
+touch "$runner_log"
+cat >"$fake_bin/wsl.exe" <<'EOF'
+#!/usr/bin/env bash
+# Drop "-d DISTRO --cd / --" and run the rest here.
+[[ "$1" == "-d" && "$3" == "--cd" && "$5" == "--" ]] || exit 9
+printf 'distro=%s\n' "$2"
+shift 5
+exec "$@"
+EOF
+chmod +x "$fake_bin/wsl.exe"
+status=0
+output=$(PR_REVIEW_WSL_BIN="$fake_bin/wsl.exe" bash "$project_dir/scripts/check-hosts.sh" codex=other 2>&1 </dev/null) || status=$?
+((status == 0)) || fail "check-hosts.sh must pass for a healthy host: $output"
+assert_contains "$output" '== codex (WSL distribution other)' "target heading mismatch"
+assert_contains "$output" 'distro=other' "the distribution name was not passed to wsl.exe"
+assert_contains "$output" 'OK   github    signed in as larkbot-codex' "the host check did not run"
+assert_contains "$output" 'check-hosts.sh: all hosts are healthy' "healthy summary missing"
+status=0
+output=$(FAKE_GH_ISSUES='#12 [bot-health] codex (larkbot-codex) review alert' PR_REVIEW_WSL_BIN="$fake_bin/wsl.exe" \
+    bash "$project_dir/scripts/check-hosts.sh" codex=other 2>&1 </dev/null) || status=$?
+((status == 1)) || fail "an open health issue must fail check-hosts.sh"
+assert_contains "$output" 'FAIL #12 [bot-health] codex (larkbot-codex) review alert' "health issue was not listed"
+if bash "$project_dir/scripts/check-hosts.sh" nobody >/dev/null 2>&1; then
+    fail "an unknown role must fail"
+fi
+
+printf 'pr_review_health_test.sh: all tests passed\n'

@@ -1,0 +1,416 @@
+#!/usr/bin/env bash
+# Report the health of one pr-review host role.
+# Run it on the host, or let scripts/check-hosts.sh pipe it to "bash -s" on each WSL distribution.
+# It only reads state. It does not start a review, publish a check, or read keys and tokens.
+set -uo pipefail
+
+usage() {
+    printf 'usage: pr-review-health [--role codex|claude|gemini|services] [--repo DIR] [--no-latest]\n' >&2
+}
+
+repo_dir="${PR_REVIEW_HEALTH_REPO:-$HOME/projects/repos/pr-review}"
+role="${PR_REVIEW_ROLE:-}"
+check_latest=1
+state_root="${XDG_STATE_HOME:-$HOME/.local/state}"
+# The runner writes its log each minute, unless a review holds the lock.
+max_idle_minutes="${PR_REVIEW_HEALTH_MAX_IDLE:-10}"
+# The updater runs each hour and can wait up to 50 minutes for the review lock.
+updater_max_minutes="${PR_REVIEW_HEALTH_UPDATER_MAX_AGE:-120}"
+# A review times out after 45 minutes, plus 2 minutes to stop.
+review_max_minutes="${PR_REVIEW_HEALTH_REVIEW_MAX:-50}"
+upstream="${PR_REVIEW_HEALTH_UPSTREAM:-origin}"
+
+failures=0
+warnings=0
+
+report() {
+    local level="$1" name="$2"
+    shift 2
+    printf '%-4s %-9s %s\n' "$level" "$name" "$*"
+    case "$level" in
+        FAIL) failures=$((failures + 1)) ;;
+        WARN) warnings=$((warnings + 1)) ;;
+    esac
+}
+
+minutes_since_change() {
+    local file="$1"
+    echo $(( ($(date +%s) - $(stat -c %Y -- "$file")) / 60 ))
+}
+
+# Print the lines of a log after the last line that matches a pattern.
+lines_after_last() {
+    local pattern="$1" file="$2"
+    awk -v pattern="$pattern" '
+        $0 ~ pattern { buffer = ""; found = 1 }
+        { buffer = buffer $0 "\n" }
+        END { if (found) printf "%s", buffer }
+    ' "$file"
+}
+
+detect_role() {
+    crontab -l 2>/dev/null |
+        grep -oE 'PR_REVIEW_ROLE=(codex|claude|gemini|services)' |
+        head -n 1 |
+        cut -d= -f2
+}
+
+check_clone() {
+    if [[ ! -d "$repo_dir/.git" && ! -f "$repo_dir/.git" ]]; then
+        report FAIL clone "no Git clone at $repo_dir"
+        return
+    fi
+
+    local head branch remote_head deployed
+    head=$(git -C "$repo_dir" rev-parse HEAD 2>/dev/null)
+    branch=$(git -C "$repo_dir" symbolic-ref --quiet --short HEAD 2>/dev/null || echo "detached HEAD")
+    if [[ "$branch" != main ]]; then
+        report FAIL clone "on $branch, not main; the updater stops until this is fixed"
+    fi
+    if [[ -n "$(git -C "$repo_dir" status --porcelain 2>/dev/null)" ]]; then
+        report FAIL clone "has local changes; the updater stops until they are removed"
+    fi
+
+    remote_head=$(timeout 30 git -C "$repo_dir" ls-remote "$upstream" refs/heads/main 2>/dev/null | cut -f1)
+    if [[ -z "$remote_head" ]]; then
+        report WARN clone "at ${head:0:7}; cannot read main from $upstream"
+    elif [[ "$head" == "$remote_head" ]]; then
+        report OK clone "at ${head:0:7}, same as main"
+    else
+        report WARN clone "at ${head:0:7}, main is ${remote_head:0:7}; the updater runs at minute 19 of each hour"
+    fi
+
+    local deployed_file="$state_root/pr-review-update/deployed"
+    if [[ -f "$deployed_file" ]]; then
+        deployed=$(<"$deployed_file")
+        if [[ "$deployed" != "$head" ]]; then
+            report WARN clone "the updater last installed ${deployed:0:7}, but the clone is at ${head:0:7}"
+        fi
+    fi
+}
+
+check_crontab() {
+    local current block expected outside
+    current=$(crontab -l 2>/dev/null || true)
+    block=$(awk '/^# BEGIN pr-review$/ { on = 1 } on { print } /^# END pr-review$/ { on = 0 }' <<<"$current")
+    if [[ -z "$block" ]]; then
+        report FAIL crontab "no pr-review block; run install.sh --role $role"
+        return
+    fi
+
+    expected=$(bash "$repo_dir/install.sh" --role "$role" --print-crontab 2>/dev/null || true)
+    if [[ "$block" == "$expected" ]]; then
+        report OK crontab "pr-review block matches install.sh --role $role"
+    else
+        report WARN crontab "pr-review block differs from install.sh output; run install.sh --role $role"
+    fi
+
+    outside=$(awk '
+        /^# BEGIN pr-review$/ { on = 1; next }
+        /^# END pr-review$/ { on = 0; next }
+        !on && !/^#/ && /(pr-review|dev-tools)/ { print }
+    ' <<<"$current")
+    if [[ -n "$outside" ]]; then
+        report WARN crontab "old review entry outside the pr-review block: ${outside:0:120}"
+    fi
+}
+
+check_updater() {
+    local log="$state_root/pr-review-update/cron.log"
+    if [[ ! -f "$log" ]]; then
+        report FAIL updater "no log at $log"
+        return
+    fi
+
+    local age last
+    age=$(minutes_since_change "$log")
+    last=$(grep -v '^[[:space:]]*$' "$log" | tail -n 1)
+    if ((age > updater_max_minutes)); then
+        report FAIL updater "no run for $age minutes"
+    elif [[ "$last" == *"already at verified commit"* || "$last" == *"verified and installed"* ]]; then
+        report OK updater "${last:0:120}"
+    elif [[ "$last" == *"updater started"* ]]; then
+        report OK updater "run in progress"
+    elif [[ "$last" == *"update skipped"* ]]; then
+        report WARN updater "${last:0:120}"
+    else
+        report FAIL updater "${last:0:160}"
+    fi
+}
+
+# The oldest pr-review-cron process of this user, in minutes, or nothing.
+# A job that cannot take the lock exits at once, so a long-running process holds a review.
+review_minutes() {
+    local pid oldest=""
+    local seconds
+    for pid in $(pgrep -u "$(id -u)" -f "$repo_dir/bin/pr-review-cron" 2>/dev/null); do
+        seconds=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
+        [[ -n "$seconds" ]] || continue
+        if [[ -z "$oldest" ]] || ((seconds > oldest)); then
+            oldest=$seconds
+        fi
+    done
+    if [[ -n "$oldest" ]]; then
+        echo $((oldest / 60))
+    fi
+}
+
+check_runner() {
+    local log="$state_root/pr-review/cron.log"
+    if [[ ! -f "$log" ]]; then
+        report FAIL runner "no log at $log"
+        return
+    fi
+
+    local running age last_run error finished
+    running=$(review_minutes)
+    age=$(minutes_since_change "$log")
+    last_run=$(lines_after_last ' watcher started$' "$log")
+
+    if [[ -n "$running" ]]; then
+        local target
+        target=$(grep -oE 'reviewing [^ ]+ at [0-9a-f]{7}' <<<"$last_run" | tail -n 1)
+        if [[ -z "$target" ]]; then
+            report OK runner "poll in progress"
+        elif ((running > review_max_minutes)); then
+            report FAIL runner "review has run for $running minutes, longer than the timeout: ${target:-unknown}"
+        else
+            report OK runner "review in progress for $running minutes: ${target:-unknown}"
+        fi
+        return
+    fi
+
+    if ((age > max_idle_minutes)); then
+        report FAIL runner "no run for $age minutes; check cron and the lock"
+        return
+    fi
+
+    error=$(grep -E '^pr-review-cron: ' <<<"$last_run" | head -n 1)
+    finished=$(grep -E ' watcher finished: ' <<<"$last_run" | tail -n 1)
+    if [[ -n "$error" ]]; then
+        report FAIL runner "$error"
+    elif [[ -z "$finished" ]]; then
+        report FAIL runner "the last run did not finish"
+    elif [[ "$finished" =~ ([0-9]+)\ failed,\ ([0-9]+)\ paused ]] &&
+        ((BASH_REMATCH[1] > 0 || BASH_REMATCH[2] > 0)); then
+        report WARN runner "${finished#*] }"
+    else
+        report OK runner "${finished#*] }"
+    fi
+}
+
+check_failures() {
+    local file="$state_root/pr-review/provider-failures"
+    local max="${PR_REVIEW_MAX_FAILURES:-3}"
+    if [[ ! -s "$file" ]]; then
+        report OK failures "no failed review attempts"
+        return
+    fi
+
+    local paused retrying
+    paused=$(awk -v max="$max" '$3 >= max { printf "%s%s@%s", sep, $1, substr($2, 1, 7); sep = ", " }' "$file")
+    retrying=$(awk -v max="$max" '$3 < max { n++ } END { print n + 0 }' "$file")
+    if [[ -n "$paused" ]]; then
+        report WARN failures "paused after $max failed attempts: $paused; remove the line from $file to retry"
+    fi
+    if ((retrying > 0)); then
+        report WARN failures "$retrying pull request(s) with failed attempts that will retry"
+    fi
+}
+
+check_github() {
+    local login
+    login=$(timeout 30 gh api user --jq .login 2>/dev/null)
+    if [[ -z "$login" ]]; then
+        report FAIL github "gh cannot read the signed-in account; run gh auth status"
+    elif [[ "${login,,}" != "${PR_REVIEW_REVIEWER,,}" ]]; then
+        report FAIL github "signed in as $login, expected $PR_REVIEW_REVIEWER"
+    else
+        report OK github "signed in as $login"
+    fi
+}
+
+# Print the latest npm release of a package. Use npm when it exists, else the registry API.
+latest_release() {
+    local package="$1"
+    if command -v npm >/dev/null 2>&1; then
+        timeout 60 npm view "$package" version 2>/dev/null | tail -n 1
+        return
+    fi
+    local registry="${PR_REVIEW_HEALTH_REGISTRY:-https://registry.npmjs.org}"
+    timeout 60 curl -fsS "$registry/${package/\//%2f}/latest" 2>/dev/null |
+        grep -oE '"version":"[^"]+"' |
+        head -n 1 |
+        cut -d'"' -f4
+}
+
+check_cli() {
+    local command package
+    case "$PR_REVIEW_PROVIDER" in
+        codex) command=codex package=@openai/codex ;;
+        claude) command=claude package=@anthropic-ai/claude-code ;;
+        gemini)
+            command="${PR_REVIEW_GEMINI_DRIVER:-agy}"
+            package=""
+            if [[ "$command" == gemini ]]; then
+                package=@google/gemini-cli
+            fi
+            ;;
+        *)
+            report FAIL cli "unknown provider: ${PR_REVIEW_PROVIDER:-none}"
+            return
+            ;;
+    esac
+
+    # Cron runs the review with PR_REVIEW_PATH, so look up the program the same way.
+    local review_path="${PR_REVIEW_PATH//\$HOME/$HOME}"
+    review_path="${review_path:-$PATH}"
+    local executable installed latest=""
+    executable=$(PATH="$review_path" command -v "$command") || {
+        report FAIL cli "$command is not on PR_REVIEW_PATH ($review_path)"
+        return
+    }
+    installed=$(PATH="$review_path" timeout 60 "$executable" --version 2>&1 |
+        grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
+    if [[ -z "$installed" ]]; then
+        report FAIL cli "$executable --version did not print a version"
+        return
+    fi
+
+    if ((check_latest == 0)) || [[ -z "$package" ]]; then
+        report OK cli "$command $installed"
+        return
+    fi
+    latest=$(latest_release "$package")
+    if [[ -z "$latest" ]]; then
+        report OK cli "$command $installed (latest release unknown)"
+    elif [[ "$installed" == "$latest" ]] ||
+        [[ "$(printf '%s\n%s\n' "$installed" "$latest" | sort -V | tail -n 1)" == "$installed" ]]; then
+        report OK cli "$command $installed (latest)"
+    else
+        report WARN cli "$command $installed, latest is $latest"
+    fi
+}
+
+check_quorum() {
+    local config_file mode
+    local -a config_list=()
+    read -r -a config_list <<<"${QUORUM_CONFIG_FILES:-$QUORUM_CONFIG_FILE}"
+    for config_file in "${config_list[@]}"; do
+        config_file="${config_file//\$HOME/$HOME}"
+        if [[ ! -f "$config_file" ]]; then
+            report WARN config "$config_file does not exist; install.sh does not schedule it"
+            continue
+        fi
+        # Check only the mode. Do not read the file.
+        mode=$(stat -c %a -- "$config_file")
+        if [[ "$mode" != 600 ]]; then
+            report FAIL config "$config_file has mode $mode; run chmod 600 on it"
+        else
+            report OK config "$(basename -- "$config_file") exists with mode 600"
+        fi
+    done
+
+    # The quorum writes a JSON line when a result changes, and error lines on each failed run.
+    # Its lines have no time, so use the time of the last write to judge old errors.
+    local log="$state_root/pr-review-quorum/cron.log"
+    if [[ ! -f "$log" ]]; then
+        report WARN quorum "no log at $log"
+        return
+    fi
+    local age errors last_error
+    age=$(minutes_since_change "$log")
+    errors=$(lines_after_last '^[{]' "$log" | grep -cE '^pr-review-quorum: ')
+    if ! grep -q '^[{]' "$log"; then
+        errors=$(grep -cE '^pr-review-quorum: ' "$log")
+    fi
+    if ((errors == 0)); then
+        report OK quorum "no errors after the last published result"
+        return
+    fi
+    last_error=$(grep -E '^pr-review-quorum: ' "$log" | tail -n 1)
+    if ((age <= max_idle_minutes)); then
+        report FAIL quorum "$errors error line(s) after the last result, last write $age minutes ago: $last_error"
+    else
+        report WARN quorum "$errors old error line(s), last write $age minutes ago: $last_error"
+    fi
+}
+
+main() {
+    while (($# > 0)); do
+        case "$1" in
+            --role)
+                (($# >= 2)) || {
+                    usage
+                    return 2
+                }
+                role="$2"
+                shift 2
+                ;;
+            --repo)
+                (($# >= 2)) || {
+                    usage
+                    return 2
+                }
+                repo_dir="$2"
+                shift 2
+                ;;
+            --no-latest)
+                check_latest=0
+                shift
+                ;;
+            -h | --help)
+                usage
+                return 0
+                ;;
+            *)
+                usage
+                return 2
+                ;;
+        esac
+    done
+
+    if [[ -z "$role" ]]; then
+        role=$(detect_role)
+    fi
+    case "$role" in
+        codex | claude | gemini | services) ;;
+        *)
+            printf 'pr-review-health: cannot find the role; pass --role\n' >&2
+            return 2
+            ;;
+    esac
+
+    PR_REVIEW_PROVIDER=""
+    PR_REVIEW_REVIEWER=""
+    PR_REVIEW_GEMINI_DRIVER=""
+    PR_REVIEW_PATH=""
+    QUORUM_CONFIG_FILE=""
+    QUORUM_CONFIG_FILES=""
+    local host_env="$repo_dir/hosts/$role.env"
+    if [[ -f "$host_env" ]]; then
+        # shellcheck source=/dev/null
+        source "$host_env"
+    fi
+
+    printf 'pr-review-health: %s as %s on %s\n' "$role" "$(id -un)" "$(hostname)"
+    check_clone
+    check_crontab
+    check_updater
+    if [[ "$role" == services ]]; then
+        check_quorum
+    else
+        check_runner
+        check_failures
+        check_github
+        check_cli
+    fi
+
+    printf 'pr-review-health: %s: %s failure(s), %s warning(s)\n' "$role" "$failures" "$warnings"
+    ((failures == 0))
+}
+
+# Keep stdin away from child programs. When this script arrives on stdin through "bash -s",
+# a child that reads stdin would consume the rest of the script.
+main "$@" </dev/null
+exit $?
