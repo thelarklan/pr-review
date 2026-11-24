@@ -10,6 +10,7 @@ Review one pull request in a prepared checkout and submit one evidence-backed Gi
 ## Steps
 
 1. Verify checkout and context.
+   Change to the prepared worktree after the provider starts.
    Confirm `git rev-parse HEAD` matches the target head commit.
    Read repository instructions (`AGENTS.md`, `README.md`, or policy files) and prior pull request comments.
    Done when the head matches and you know the rules of the repository and every open thread.
@@ -28,7 +29,9 @@ Review one pull request in a prepared checkout and submit one evidence-backed Gi
    Done when every finding names exact files, lines, and observable impact.
 5. Re-read HEAD and submit one review.
    Query the pull request head commit with `gh` immediately before submission so no stale review is posted.
-   Submit one review at that exact head with `gh pr review`.
+   Submit one review with `gh api` to the pull request reviews endpoint.
+   Set `commit_id` to the target head SHA, `event` to the verdict, and `body` to the review text.
+   Use `gh api --input` with a JSON file in the scratch directory.
    When a marker line is required, put it on the last line of the review body.
    Done when GitHub accepts the review on the current head commit.
 

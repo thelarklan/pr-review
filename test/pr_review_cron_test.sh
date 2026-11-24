@@ -141,6 +141,14 @@ cat >"$fake_bin/gh" <<'EOF'
 set -euo pipefail
 if [[ "$1" == "api" && "$2" == "user" ]]; then
     printf 'review-bot\n'
+elif [[ "$1" == "api" && "$2" =~ ^/repos/([^/]+/[^/]+)/pulls/([0-9]+)$ ]]; then
+    repo="${BASH_REMATCH[1]}"
+    number="${BASH_REMATCH[2]}"
+    if [[ "${PRE_PROVIDER_FAIL_NUMBER:-}" == "$number" ]]; then exit 8; fi
+    row=$(awk -F'\t' -v key="$repo#$number" '$1 == key { print; exit }' "$PR_META_FILE")
+    [[ -n "$row" ]] || exit 1
+    IFS=$'\t' read -r _key head base_ref base_sha pr_state <<<"$row"
+    printf '%s\n%s\n%s\nhttps://github.com/%s/pull/%s\n' "$head" "$base_ref" "$base_sha" "$repo" "$number"
 elif [[ "$1" == "api" && "$*" == */reviews* ]]; then
     if [[ -n "${BEFORE_REVIEWS_TSV:-}" && ! -e "${REVIEW_SUBMITTED:-/nonexistent}" ]]; then
         printf '%s\n' "$BEFORE_REVIEWS_TSV"
@@ -270,7 +278,12 @@ if [[ -n "${PROVIDER_CWD:-}" ]]; then
     pwd >"$PROVIDER_CWD"
 fi
 if [[ -n "${PROVIDER_HEAD_FILE:-}" ]]; then
-    git rev-parse HEAD >"$PROVIDER_HEAD_FILE"
+    args=("$@")
+    while (($#)); do
+        if [[ "$1" == "--add-dir" ]]; then git -C "$2" rev-parse HEAD >"$PROVIDER_HEAD_FILE"; break; fi
+        shift
+    done
+    set -- "${args[@]}"
 fi
 printf '%s\n' "$@" >"$PROVIDER_ARGS"
 touch "$REVIEW_SUBMITTED"
@@ -315,12 +328,11 @@ grep -Fq "confirmed review 102 for owner/repository#7 at $repo_commit_a" \
 
 expected_worktree="$home_dir/.local/share/pr-review/work/prs/owner__repository__pr-7/repo"
 expected_scratch="$home_dir/.local/share/pr-review/work/prs/owner__repository__pr-7/scratch"
-[[ "$(cat "$provider_cwd")" == "$expected_worktree" ]] ||
-    fail "provider did not run inside the prepared PR worktree"
+[[ "$(cat "$provider_cwd")" == "$expected_scratch" ]] ||
+    fail "provider did not run outside the PR worktree"
 [[ "$(cat "$provider_head")" == "$repo_commit_a" ]] ||
     fail "worktree was not checked out at exact PR head"
-assert_arg_pair "$provider_args" -C "$expected_worktree" "Codex -C did not point to PR worktree"
-assert_arg_pair "$provider_args" --add-dir "$expected_scratch" "Codex --add-dir did not include PR scratch"
+assert_arg_pair "$provider_args" --add-dir "$expected_worktree" "Codex --add-dir did not include PR worktree"
 assert_arg_pair "$provider_args" --model gpt-6.2-sol "Codex model was not pinned to gpt-6.2-sol"
 assert_arg_pair "$provider_args" --config 'model_reasoning_effort="high"' \
     "Codex reasoning effort was not pinned"
@@ -475,7 +487,7 @@ TOKEN_CAPTURE="$token_capture" \
 assert_arg_pair "$provider_args" --model claude-opus-5-5 "Claude model was not pinned to claude-opus-5-5"
 assert_arg_pair "$provider_args" --effort high "Claude effort was not pinned"
 assert_arg_pair "$provider_args" --add-dir \
-    "$home_dir/.local/share/pr-review/work/prs/owner__claude__pr-8/scratch" \
+    "$home_dir/.local/share/pr-review/work/prs/owner__claude__pr-8/repo" \
     "Claude --add-dir did not include PR scratch"
 [[ "$(cat "$token_capture")" == "secret-oauth-value" ]] ||
     fail "provider env file did not supply CLAUDE_CODE_OAUTH_TOKEN"
@@ -512,7 +524,7 @@ assert_arg_pair "$provider_args" --model gemini-4-neon-high \
 assert_no_arg "$provider_args" --effort \
     "Antigravity passed --effort when PR_REVIEW_ANTIGRAVITY_EFFORT was empty"
 assert_arg_pair "$provider_args" --add-dir \
-    "$home_dir/.local/share/pr-review/work/prs/owner__gemini__pr-9/scratch" \
+    "$home_dir/.local/share/pr-review/work/prs/owner__gemini__pr-9/repo" \
     "Antigravity --add-dir did not include PR scratch"
 
 rm -- "$review_marker"
@@ -574,7 +586,10 @@ if [[ -n "${PROVIDER_CALLS:-}" ]]; then
     printf '%s\n' "$((call_count + 1))" >"$PROVIDER_CALLS"
 fi
 printf '%s\n' "$@" >"$PROVIDER_ARGS"
-git rev-parse HEAD >"$REVIEW_SUBMITTED"
+while (($#)); do
+    if [[ "$1" == "--add-dir" ]]; then git -C "$2" rev-parse HEAD >"$REVIEW_SUBMITTED"; break; fi
+    shift
+done
 printf 'submitted test review\n'
 EOF
 chmod +x "$fake_bin/codex"

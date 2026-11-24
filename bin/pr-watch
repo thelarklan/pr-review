@@ -165,7 +165,7 @@ main() {
     local command_rows command_id command_time followup_key followup_count escalation_key
     local graphql_query
     local -a blocking_peers=()
-    local -A cohort_map=() peer_decisive_state=() peer_decisive_time=() peer_decisive_id=()
+    local -A cohort_map=() peer_decisive_state=() peer_decisive_commit=() peer_decisive_time=() peer_decisive_id=()
     local -A peer_any_state=() peer_any_commit=() peer_any_time=() peer_any_id=()
 
     for peer in "${cohort_list[@]}"; do
@@ -226,6 +226,7 @@ main() {
         my_decisive_time=""
         my_decisive_id=""
         peer_decisive_state=()
+        peer_decisive_commit=()
         peer_decisive_time=()
         peer_decisive_id=()
         peer_any_state=()
@@ -265,6 +266,7 @@ main() {
                 if [[ "$state_uc" == "APPROVED" || "$state_uc" == "CHANGES_REQUESTED" || "$state_uc" == "DISMISSED" ]] &&
                     _pr_watch_is_newer "$submitted" "$review_id" "${peer_decisive_time[$login_lc]:-}" "${peer_decisive_id[$login_lc]:-}"; then
                     peer_decisive_state["$login_lc"]="$state_uc"
+                    peer_decisive_commit["$login_lc"]="$commit"
                     peer_decisive_time["$login_lc"]="$submitted"
                     peer_decisive_id["$login_lc"]="$review_id"
                 fi
@@ -280,7 +282,8 @@ main() {
                         continue
                     fi
                     if [[ "${peer_decisive_state[$peer_lc]:-}" == "CHANGES_REQUESTED" ]]; then
-                        if [[ "${peer_any_commit[$peer_lc]:-}" == "$head" &&
+                        if [[ "${peer_decisive_commit[$peer_lc]:-}" != "$head" &&
+                            "${peer_any_commit[$peer_lc]:-}" == "$head" &&
                             "${peer_any_state[$peer_lc]:-}" != "CHANGES_REQUESTED" ]]; then
                             continue
                         fi
