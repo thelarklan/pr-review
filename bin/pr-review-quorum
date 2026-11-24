@@ -1,6 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# On exit, remove the work directory and record the poll result.
+# When QUORUM_STATUS_FILE is set (install.sh sets it in cron), the file gets "TIME STATUS".
+# bin/pr-review-health reads it, because a poll can log errors and still print a result line.
+quorum_exit() {
+    local status="$1"
+    [[ -z "${quorum_work_dir:-}" ]] || rm -rf -- "$quorum_work_dir"
+    if [[ -n "${QUORUM_STATUS_FILE:-}" ]]; then
+        {
+            printf '%s %s\n' "$(date --iso-8601=seconds)" "$status" >"$QUORUM_STATUS_FILE.next" &&
+                mv -f -- "$QUORUM_STATUS_FILE.next" "$QUORUM_STATUS_FILE"
+        } 2>/dev/null || printf 'pr-review-quorum: could not write %s\n' "$QUORUM_STATUS_FILE" >&2
+    fi
+}
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    trap 'quorum_exit $?' EXIT
+fi
+
 config_file="${QUORUM_CONFIG_FILE:-}"
 if [[ -n "$config_file" ]]; then
     [[ -f "$config_file" ]] || {
@@ -351,7 +368,7 @@ main() {
         return 1
     }
     quorum_work_dir=$(mktemp -d)
-    trap cleanup_work_dir EXIT
+    trap 'quorum_exit $?' EXIT
 
     while IFS= read -r repository; do
         full_name=$(jq -er '.full_name' <<<"$repository") || {
@@ -471,9 +488,6 @@ main() {
 }
 
 quorum_work_dir=''
-cleanup_work_dir() {
-    [[ -z "$quorum_work_dir" ]] || rm -rf -- "$quorum_work_dir"
-}
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     main "$@"

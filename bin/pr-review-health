@@ -315,6 +315,7 @@ check_cli() {
 
 check_quorum() {
     local config_file config_name mode
+    local existing=0
     local -a config_list=()
     read -r -a config_list <<<"${QUORUM_CONFIG_FILES:-$QUORUM_CONFIG_FILE}"
     for config_file in "${config_list[@]}"; do
@@ -324,6 +325,7 @@ check_quorum() {
             report WARN config "$config_file does not exist; install.sh does not schedule it"
             continue
         fi
+        existing=$((existing + 1))
         # Check only the mode. Do not read the file.
         mode=$(stat -c %a -- "$config_file")
         if [[ "$mode" != 600 ]]; then
@@ -331,37 +333,39 @@ check_quorum() {
         else
             report OK config "$config_name.env exists with mode 600"
         fi
-        check_quorum_log "$config_name"
+        check_quorum_poll "$config_name"
     done
+
+    # One missing config is normal on an organization-only host. No config means no quorum check.
+    if ((existing == 0)); then
+        report FAIL config "no quorum config exists (${QUORUM_CONFIG_FILES:-${QUORUM_CONFIG_FILE:-none set}}); see docs/recreate.md"
+    fi
 }
 
-# Each App installation writes its own log (see install.sh).
-# A result from one installation must not hide an error from the other.
-check_quorum_log() {
+# Each App installation has its own status file (see install.sh).
+# pr-review-quorum writes "TIME STATUS" to it when a poll ends.
+# A poll can log errors and still print a result line, so judge the exit status, not the log.
+check_quorum_poll() {
     local config_name="$1"
+    local status_file="$state_root/pr-review-quorum/$config_name.status"
     local log="$state_root/pr-review-quorum/$config_name.log"
-    if [[ ! -f "$log" ]]; then
-        report WARN quorum "$config_name: no log at $log"
+    if [[ ! -f "$status_file" ]]; then
+        report WARN quorum "$config_name: no poll status at $status_file; run install.sh --role services"
         return
     fi
 
-    # The quorum writes a JSON line when a result changes, and error lines on each failed run.
-    # Its lines have no time, so use the time of the last write to judge old errors.
-    local age errors last_error
-    age=$(minutes_since_change "$log")
-    errors=$(lines_after_last '^[{]' "$log" | grep -cE '^pr-review-quorum: ')
-    if ! grep -q '^[{]' "$log"; then
-        errors=$(grep -cE '^pr-review-quorum: ' "$log")
+    local age when status last_error=""
+    age=$(minutes_since_change "$status_file")
+    read -r when status <"$status_file" || true
+    if [[ -f "$log" ]]; then
+        last_error=$(grep -E '^pr-review-quorum: ' "$log" | tail -n 1)
     fi
-    if ((errors == 0)); then
-        report OK quorum "$config_name: no errors after the last published result"
-        return
-    fi
-    last_error=$(grep -E '^pr-review-quorum: ' "$log" | tail -n 1)
-    if ((age <= max_idle_minutes)); then
-        report FAIL quorum "$config_name: $errors error line(s) after the last result, last write $age minutes ago: $last_error"
+    if ((age > max_idle_minutes)); then
+        report FAIL quorum "$config_name: no finished poll for $age minutes; check cron and the lock"
+    elif [[ "$status" != 0 ]]; then
+        report FAIL quorum "$config_name: the last poll at $when exited with status ${status:-unknown}${last_error:+: $last_error}"
     else
-        report WARN quorum "$config_name: $errors old error line(s), last write $age minutes ago: $last_error"
+        report OK quorum "$config_name: the last poll at $when succeeded"
     fi
 }
 

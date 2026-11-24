@@ -79,8 +79,8 @@ Each line starts with `OK`, `WARN`, or `FAIL`. The command exits `1` when a line
 | `failures` | bots | Paused and retrying pull requests in `provider-failures`. |
 | `github` | bots | The `gh` login compared with the bot account. |
 | `cli` | bots | The AI CLI version compared with the latest npm release. `agy` has no release feed. |
-| `config` | `services` | Each quorum config exists with mode `600`. It does not read the file. |
-| `quorum` | `services` | Error lines after the last published result, in the log of each App installation. |
+| `config` | `services` | Each quorum config exists with mode `600`, and at least one exists. It does not read the file. |
+| `quorum` | `services` | The exit status and age of the last poll of each App installation, from its `.status` file. |
 
 ## Default reviewer models
 

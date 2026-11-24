@@ -316,49 +316,73 @@ fi
 assert_contains "$output" 'FAIL updater   no run for 180 minutes' "stopped updater was not reported"
 printf '\n[2026-11-23T20:19:01-07:00] updater started\n[2026-11-23T20:19:03-07:00] already at verified commit abc\n' >"$updater_log"
 
-# 11. The services role checks the config mode and the quorum log.
-mkdir -p "$home_dir/.config/pr-review"
-touch "$home_dir/.config/pr-review/pr-review-quorum.env" "$home_dir/.config/pr-review/thelarklanlabs.env"
-chmod 600 "$home_dir/.config/pr-review/pr-review-quorum.env"
-chmod 644 "$home_dir/.config/pr-review/thelarklanlabs.env"
-# Each App installation has its own log, named after its config file.
+# 11. The services role checks the config mode and the last poll of each App installation.
+config_dir="$home_dir/.config/pr-review"
+mkdir -p "$config_dir"
+touch "$config_dir/pr-review-quorum.env" "$config_dir/thelarklanlabs.env"
+chmod 600 "$config_dir/pr-review-quorum.env"
+chmod 644 "$config_dir/thelarklanlabs.env"
+# Each installation has its own log and status file, named after its config file.
+# pr-review-quorum writes "TIME STATUS" to the status file when a poll ends.
 quorum_log="$state_dir/pr-review-quorum/thelarklanlabs.log"
+quorum_status="$state_dir/pr-review-quorum/thelarklanlabs.status"
 user_quorum_log="$state_dir/pr-review-quorum/pr-review-quorum.log"
+user_quorum_status="$state_dir/pr-review-quorum/pr-review-quorum.status"
+write_poll_status() {
+    printf '%s %s\n' "$(stamp now)" "$2" >"$1"
+}
 printf 'pr-review-quorum: could not list open pull requests for a/b\n{"repository":"a/b","pull":1}\n' >"$quorum_log"
+write_poll_status "$quorum_status" 0
 printf '{"repository":"thelarklan/x","pull":1}\n' >"$user_quorum_log"
+write_poll_status "$user_quorum_status" 0
 run_health --role services --no-latest || true
 assert_contains "$output" 'OK   config    pr-review-quorum.env exists with mode 600' "good config mode missing"
 assert_contains "$output" 'thelarklanlabs.env has mode 644; run chmod 600 on it' "bad config mode missing"
-assert_contains "$output" 'OK   quorum    thelarklanlabs: no errors after the last published result' \
-    "old errors before a result must pass"
-assert_contains "$output" 'OK   quorum    pr-review-quorum: no errors after the last published result' \
-    "the user-account log was not checked"
+assert_contains "$output" 'OK   quorum    thelarklanlabs: the last poll at' "a successful poll must pass"
+assert_contains "$output" 'OK   quorum    pr-review-quorum: the last poll at' "the user-account poll was not checked"
 assert_no_row "$output" runner "services must not check a review runner"
-chmod 600 "$home_dir/.config/pr-review/thelarklanlabs.env"
-printf 'curl: (22) The requested URL returned error: 403\npr-review-quorum: could not list open pull requests for a/c\n' >>"$quorum_log"
-if run_health --role services; then
-    fail "current quorum errors must fail"
-fi
-assert_contains "$output" 'FAIL quorum    thelarklanlabs: 1 error line(s) after the last result' "current quorum error was not reported"
-touch -d '1 hour ago' "$quorum_log"
-run_health --role services || fail "old quorum errors must only warn: $output"
-assert_contains "$output" 'WARN quorum    thelarklanlabs: 1 old error line(s), last write 60 minutes ago' \
-    "old quorum error was not reported"
+chmod 600 "$config_dir/thelarklanlabs.env"
+run_health --role services || fail "successful polls must pass: $output"
 
-# A result from one installation must not hide a current error from the other.
-printf '{"repository":"a/b","pull":2}\n' >>"$quorum_log"
-printf 'pr-review-quorum: could not create an installation token\n' >>"$user_quorum_log"
+# A poll can log errors, publish a failure result, and exit 1. The exit status decides.
+printf 'pr-review-quorum: could not re-read reviews for a/b#1; publishing failure\n{"repository":"a/b","pull":1,"conclusion":"failure"}\n' \
+    >>"$quorum_log"
+write_poll_status "$quorum_status" 1
 if run_health --role services; then
-    fail "an error of one installation must fail after a result of the other"
+    fail "a failed poll with a result line must fail"
 fi
-assert_contains "$output" 'FAIL quorum    pr-review-quorum: 1 error line(s) after the last result' \
-    "the error of the user-account installation was hidden"
-assert_contains "$output" 'OK   quorum    thelarklanlabs: no errors after the last published result' \
-    "the organization result must pass"
-printf '{"repository":"thelarklan/x","pull":2}\n' >>"$user_quorum_log"
-rm -f "$quorum_log"
-run_health --role services || fail "a missing log must only warn: $output"
-assert_contains "$output" 'WARN quorum    thelarklanlabs: no log at' "missing installation log was not reported"
+assert_contains "$output" 'FAIL quorum    thelarklanlabs: the last poll at' "failed poll was not reported"
+assert_contains "$output" 'exited with status 1: pr-review-quorum: could not re-read reviews for a/b#1' \
+    "failed poll status or error mismatch"
+assert_contains "$output" 'OK   quorum    pr-review-quorum: the last poll at' \
+    "a failed poll of one installation must not change the other"
+
+# A poll that stops running fails, even when its last result was good.
+write_poll_status "$quorum_status" 0
+touch -d '1 hour ago' "$quorum_status"
+if run_health --role services; then
+    fail "a stopped quorum poll must fail"
+fi
+assert_contains "$output" 'FAIL quorum    thelarklanlabs: no finished poll for 60 minutes' "stopped poll was not reported"
+write_poll_status "$quorum_status" 0
+
+# A host that has not installed the status file yet only warns.
+rm -f "$quorum_status"
+run_health --role services || fail "a missing status file must only warn: $output"
+assert_contains "$output" 'WARN quorum    thelarklanlabs: no poll status at' "missing status file was not reported"
+write_poll_status "$quorum_status" 0
+
+# One missing config only warns. When no configured config exists, the check fails.
+mv "$config_dir/pr-review-quorum.env" "$test_dir/pr-review-quorum.env.saved"
+run_health --role services || fail "one missing config must only warn: $output"
+assert_contains "$output" 'WARN config    '"$config_dir"'/pr-review-quorum.env does not exist' "missing config was not reported"
+mv "$config_dir/thelarklanlabs.env" "$test_dir/thelarklanlabs.env.saved"
+if run_health --role services; then
+    fail "services without any quorum config must fail"
+fi
+assert_contains "$output" 'FAIL config    no quorum config exists' "no config was not reported"
+mv "$test_dir/pr-review-quorum.env.saved" "$config_dir/pr-review-quorum.env"
+mv "$test_dir/thelarklanlabs.env.saved" "$config_dir/thelarklanlabs.env"
 
 # 12. scripts/check-hosts.sh runs the check through wsl.exe and lists health issues.
 # Each call gets /dev/null as stdin, because the fake gh reads stdin.

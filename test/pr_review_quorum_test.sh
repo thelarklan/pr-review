@@ -326,6 +326,23 @@ if QUORUM_REPOSITORY_OWNER_IDS="166922787,org" QUORUM_CONFIG_FILE="$config_file"
     fail 'non-numeric QUORUM_REPOSITORY_OWNER_IDS was accepted'
 fi
 
+# Each poll records "TIME STATUS" in QUORUM_STATUS_FILE, for bin/pr-review-health.
+status_file="$test_dir/quorum.status"
+GRAPHQL_LOG="$graphql_log" QUORUM_CONFIG_FILE="$config_file" QUORUM_STATUS_FILE="$status_file" \
+    "$project_dir/bin/pr-review-quorum" >/dev/null
+[[ "$(cut -d' ' -f2 "$status_file")" == 0 ]] || fail 'a successful poll did not record status 0'
+if QUORUM_REPOSITORY_OWNER_IDS="166922787,org" QUORUM_CONFIG_FILE="$config_file" \
+    QUORUM_STATUS_FILE="$status_file" "$project_dir/bin/pr-review-quorum" >/dev/null 2>&1; then
+    fail 'non-numeric QUORUM_REPOSITORY_OWNER_IDS was accepted'
+fi
+[[ "$(cut -d' ' -f2 "$status_file")" == 1 ]] || fail 'a failed poll did not record status 1'
+if QUORUM_CONFIG_FILE="$test_dir/missing.env" QUORUM_STATUS_FILE="$status_file" \
+    "$project_dir/bin/pr-review-quorum" >/dev/null 2>&1; then
+    fail 'a missing config file was accepted'
+fi
+[[ "$(cut -d' ' -f2 "$status_file")" == 1 ]] || fail 'a config error did not record status 1'
+rm -f "$status_file"
+
 head_change_pull_counter="$test_dir/head-change-pulls"
 before_mutations=$(wc -l <"$graphql_log")
 integration_output=$(FAKE_HEAD_CHANGE=1 \

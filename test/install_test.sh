@@ -75,6 +75,10 @@ assert_contains "$services_cron" '/pr-review-quorum.lock" /usr/bin/env QUORUM_CO
 assert_contains "$services_cron" '/thelarklanlabs.lock" /usr/bin/env QUORUM_CONFIG_FILE="$HOME/.config/pr-review/thelarklanlabs.env"' "services organization config missing"
 assert_contains "$services_cron" '>>"$HOME/.local/state/pr-review-quorum/pr-review-quorum.log" 2>&1' "user-account quorum log missing"
 assert_contains "$services_cron" '>>"$HOME/.local/state/pr-review-quorum/thelarklanlabs.log" 2>&1' "organization quorum log missing"
+assert_contains "$services_cron" 'QUORUM_STATUS_FILE="$HOME/.local/state/pr-review-quorum/pr-review-quorum.status"' \
+    "user-account quorum status file missing"
+assert_contains "$services_cron" 'QUORUM_STATUS_FILE="$HOME/.local/state/pr-review-quorum/thelarklanlabs.status"' \
+    "organization quorum status file missing"
 [[ "$(grep -c 'bin/pr-review-quorum"' <<<"$services_cron")" == 2 ]] || \
     fail "services must run one quorum pass per config"
 assert_contains "$services_cron" "$install_dir/bin/pr-review-quorum" "services quorum path mismatch"
