@@ -37,7 +37,8 @@ Cron jobs execute directly from the clone instead of copying binaries to `~/.loc
 Each bot reviewer runs each minute. Its lock skips a run while the previous review is still going.
 
 Review is opt-in. The bots review only pull requests with the label `bot-review` (`PR_REVIEW_LABEL` in `hosts/*.env`).
-To request review, run `gh pr edit NUMBER --add-label bot-review`.
+To request review, run `gh api -X POST /repos/OWNER/REPO/issues/NUMBER/labels -f 'labels[]=bot-review'`.
+Use the REST endpoint instead of `gh pr edit --add-label`, which fails on `gh` `2.46.0` after GitHub removed `projectCards`.
 Add the label when the pull request is ready.
 With `PR_REVIEW_COHORT` set, tiered re-reviews defer previously approved bots while another bot has `CHANGES_REQUESTED`.
 Once no bot requests changes, previously approved bots wake on the next poll for one final delta sign-off review.
