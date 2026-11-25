@@ -21,12 +21,14 @@ Review one pull request in a prepared checkout and submit one evidence-backed Gi
 3. Run proportionate verification.
    Run fast, relevant local tests or linters for the changed files when the environment supports them.
    Done when each relevant check finishes or you record why it could not run.
-4. Choose one decisive verdict.
-   - Use `REQUEST_CHANGES` when any concrete defect, regression, or missing required check remains.
-   - Use `APPROVE` only after the defect-seeking pass finds no blocking issue.
+4. Classify each finding and choose one decisive verdict.
+   Mark each finding as blocking or non-blocking with the [blocking bar](#blocking-bar).
+   - Use `REQUEST_CHANGES` when at least one blocking finding remains.
+   - Use `APPROVE` when the defect-seeking pass finds no blocking finding.
      Treat `APPROVE` as an earned conclusion, not as the default outcome.
+     Put non-blocking findings in the approval body under the heading "Non-blocking notes".
    - Use `COMMENT` only when an environment blocker prevents a safe verdict, or when answering a question without changing a prior verdict.
-   Done when every finding names exact files, lines, and observable impact.
+   Done when every finding names exact files, lines, observable impact, and its class.
 5. Re-read HEAD and submit one review.
    Query the pull request head commit with `gh` immediately before submission so no stale review is posted.
    Submit one review with `gh api` to the pull request reviews endpoint.
@@ -34,6 +36,25 @@ Review one pull request in a prepared checkout and submit one evidence-backed Gi
    Use `gh api --input` with a JSON file in the scratch directory.
    When a marker line is required, put it on the last line of the review body.
    Done when GitHub accepts the review on the current head commit.
+
+## Blocking bar
+
+Classify each finding in this order:
+
+1. A finding is blocking if it has one of these impacts, however rare the trigger:
+   - A security risk, for example a leaked secret, a permission bypass, or unsafe shell input.
+   - Data that can be lost or corrupted.
+   - A required build, test, or check that fails.
+2. Otherwise, a finding is blocking if a user or a scheduled job meets it in normal use or with a likely configuration.
+   This includes a documented behavior that fails in normal use.
+3. All other findings are non-blocking. These are examples:
+   - The failure needs a contrived setup, for example an unusual manual edit of a managed file, crontab, or config.
+   - The failure needs a narrow race between independent processes.
+   - No realistic input reaches an untested path.
+   - The finding is about style, names, or a cleaner design.
+
+For step 2, if you are not sure, ask: "Will the owner meet this failure in normal use of the tool?"
+If the answer is no, the finding is non-blocking.
 
 ## Hard limits
 

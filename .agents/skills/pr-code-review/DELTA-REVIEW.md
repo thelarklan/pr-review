@@ -10,10 +10,20 @@ Use this branch for a `delta-re-review` after new commits or a `same-head-follow
    Done when you read every new hunk or comment since your prior review.
 2. Verify prior concerns and shared boundaries.
    Confirm whether the code resolves every open concern from your prior review and from other reviewers.
+   A concern is resolved when the fix handles the reported case.
+   A rare variant of the reported case is a new finding. Classify it with the blocking bar in `SKILL.md`.
    Inspect untouched files only where the delta changes a shared contract, state format, or caller.
    Done when every open thread and affected boundary is verified.
-3. Perform a focused defect-seeking pass on the delta.
+3. Check the delta for new blocking defects.
    Work independently of the pull request description and existing CI results.
    Identify the highest-risk behavior added or changed since `<prior_sha>`.
-   Trace its failure and boundary paths, and check whether tests could pass while documented behavior still fails.
-   Done when no high-risk delta path remains unverified.
+   Check whether that behavior fails in normal use, or whether tests could pass while documented behavior still fails.
+   Classify each finding with the blocking bar in `SKILL.md`.
+   Report rare or contrived cases in the fix as non-blocking notes, unless they have a security, data-loss, or required-check impact.
+   Done when each changed behavior that normal use reaches is verified.
+
+## Review rounds
+
+The run context gives the number of your earlier change requests on this pull request.
+When that number is 2 or more, keep the review on the fixes and the newest changes.
+In that case, block only for a prior blocking finding that is not fixed, or for a new finding that meets the blocking bar.
