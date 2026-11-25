@@ -238,6 +238,7 @@ inspect_reviewer_state() {
     local active_id="" active_commit="" active_time="" active_state=""
     local decisive_id="" decisive_commit="" decisive_time="" decisive_state=""
     local prior_id="" prior_commit="" prior_state="" push_status=0
+    local -A change_request_commits=()
 
     rows=$(gh api --paginate "/repos/$repo/pulls/$number/reviews?per_page=100" \
         --jq ".[] | select(((.user.login // \"\") | ascii_downcase) == \"${reviewer,,}\") | [((.id // 0) | tostring), (if (.commit_id // \"\") == \"\" then \"-\" else .commit_id end), (if (.submitted_at // \"\") == \"\" then \"-\" else .submitted_at end), (if (.state // \"\") == \"\" then \"-\" else (.state | ascii_upcase) end)] | @tsv") || return 1
@@ -247,6 +248,9 @@ inspect_reviewer_state() {
         [[ "$submitted" == "-" ]] && submitted=""
         [[ "$state" == "-" ]] && state=""
         [[ -n "$review_id" && "$review_id" != "0" ]] || continue
+        if [[ "$state" == "CHANGES_REQUESTED" ]]; then
+            change_request_commits["${commit:-review-$review_id}"]=1
+        fi
         if [[ "$state" != "DISMISSED" ]] &&
             is_newer_review "$submitted" "$review_id" "$active_time" "$active_id"; then
             active_id="$review_id"
@@ -286,8 +290,10 @@ inspect_reviewer_state() {
         fi
     fi
 
-    printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
-        "$active_id" "$active_commit" "$prior_id" "$prior_commit" "$prior_state" "$active_state"
+    # Line 7 counts the distinct head commits where this reviewer requested changes.
+    printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+        "$active_id" "$active_commit" "$prior_id" "$prior_commit" "$prior_state" "$active_state" \
+        "${#change_request_commits[@]}"
 }
 
 read_pr_metadata() {
@@ -655,6 +661,7 @@ while IFS= read -r item; do
     prior_review_id="${before_review[2]:-}"
     prior_review_commit="${before_review[3]:-}"
     prior_review_state="${before_review[4]:-}"
+    earlier_change_requests="${before_review[6]:-0}"
 
     prune_other_heads "$item" "$current_head"
     attempt_count=$(failure_count "$item" "$current_head")
@@ -736,6 +743,7 @@ while IFS= read -r item; do
         "- Prepared git worktree (clean detached HEAD): $pr_worktree" \
         "- Scratch directory (outside repo): $pr_scratch" \
         "- $prior_context_line" \
+        "- Earlier change requests by $reviewer on this pull request: $earlier_change_requests" \
         "- Primary diff range: $diff_range" \
         "- Required final line of the GitHub review body: _reviewed from: $provider-wsl-cron_" \
         "" \

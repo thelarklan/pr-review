@@ -348,6 +348,10 @@ grep -Fq 'Do not manufacture nits' "$provider_args" ||
     fail "review prompt does not reject quota-driven findings"
 grep -Fq 'not as the default outcome' "$provider_args" ||
     fail "review prompt does not set the approval threshold"
+grep -Fq '## Blocking bar' "$provider_args" ||
+    fail "review prompt does not define the blocking bar"
+grep -Fq 'Non-blocking notes' "$provider_args" ||
+    fail "review prompt does not put non-blocking findings in the approval"
 if grep -Fqx 'name: pr-code-review' "$provider_args"; then
     fail "YAML frontmatter leaked into inlined review prompt"
 fi
@@ -387,6 +391,39 @@ grep -Fq "Primary diff range: $repo_commit_a..$repo_commit_b" "$provider_args" |
     fail "delta diff range was not passed"
 grep -Fq 'state=APPROVED (dismissed on push)' "$provider_args" ||
     fail "prior push-dismissed approval context was missing"
+grep -Fq 'Earlier change requests by review-bot on this pull request: 0' "$provider_args" ||
+    fail "change-request count was not zero without earlier change requests"
+grep -Fq 'A concern is resolved when the fix handles the reported case' "$provider_args" ||
+    fail "delta review does not limit prior concerns to the reported case"
+grep -Fq 'Report rare or contrived cases in the fix as non-blocking notes' "$provider_args" ||
+    fail "delta review does not make contrived cases non-blocking"
+
+# The prompt counts distinct head commits where this reviewer requested changes.
+rm -- "$review_marker"
+change_request_rows=$(printf '%s\n' \
+    "$(printf '98\t%s\t2026-08-26T08:00:00Z\tCHANGES_REQUESTED' "$repo_commit_c")" \
+    "$(printf '99\t%s\t2026-08-26T09:00:00Z\tCHANGES_REQUESTED' "$repo_commit_a")" \
+    "$(printf '100\t%s\t2026-08-26T09:30:00Z\tCHANGES_REQUESTED' "$repo_commit_a")" \
+    "$(printf '101\t%s\t2026-08-26T10:00:00Z\tCOMMENTED' "$repo_commit_a")")
+HOME="$home_dir" \
+PATH="$fake_bin:/usr/local/bin:/usr/bin:/bin" \
+PR_REVIEW_PROVIDER=codex \
+PR_REVIEW_PATH="$fake_bin:$toolchain_bin:/usr/local/bin:/usr/bin:/bin" \
+PR_REVIEW_WATCH_BIN="$fake_bin/pr-watch" \
+PR_REVIEW_CODEX_BIN="$fake_bin/codex" \
+PR_REVIEW_GIT_BASE_URL="file://$remotes_root" \
+PR_REVIEW_TIMEOUT=5s \
+PR_WATCH_ITEM=owner/repository#7 \
+PR_WATCH_RECORD_STATE=0 \
+PR_META_FILE="$pr_meta_file" \
+ACTIVE_HEAD_SHA="$repo_commit_b" \
+BEFORE_REVIEWS_TSV="$change_request_rows" \
+REVIEW_SUBMITTED="$review_marker" \
+PROVIDER_ARGS="$provider_args" \
+PROVIDER_HEAD_FILE="$provider_head" \
+    "$project_dir/bin/pr-review-cron"
+grep -Fq 'Earlier change requests by review-bot on this pull request: 2' "$provider_args" ||
+    fail "change-request count did not count distinct head commits"
 
 # A comment is not evidence of a completed review.
 rm -- "$review_marker"
