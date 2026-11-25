@@ -352,6 +352,11 @@ grep -Fq '## Blocking bar' "$provider_args" ||
     fail "review prompt does not define the blocking bar"
 grep -Fq 'Non-blocking notes' "$provider_args" ||
     fail "review prompt does not put non-blocking findings in the approval"
+grep -Fq 'however rare the trigger' "$provider_args" ||
+    fail "review prompt lets rarity override security, data-loss, or required-check impact"
+if grep -Fq '## Review rounds' "$provider_args"; then
+    fail "first-pass prompt includes the delta-only review-round scope limit"
+fi
 if grep -Fqx 'name: pr-code-review' "$provider_args"; then
     fail "YAML frontmatter leaked into inlined review prompt"
 fi
@@ -395,8 +400,10 @@ grep -Fq 'Earlier change requests by review-bot on this pull request: 0' "$provi
     fail "change-request count was not zero without earlier change requests"
 grep -Fq 'A concern is resolved when the fix handles the reported case' "$provider_args" ||
     fail "delta review does not limit prior concerns to the reported case"
-grep -Fq 'Report rare or contrived cases in the fix as non-blocking notes' "$provider_args" ||
+grep -Fq 'Report rare or contrived cases in the fix as non-blocking notes, unless they have a security' "$provider_args" ||
     fail "delta review does not make contrived cases non-blocking"
+grep -Fq '## Review rounds' "$provider_args" ||
+    fail "delta review does not include the review-round scope limit"
 
 # The prompt counts distinct head commits where this reviewer requested changes.
 rm -- "$review_marker"

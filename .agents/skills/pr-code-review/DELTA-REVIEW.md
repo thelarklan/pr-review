@@ -18,5 +18,12 @@ Use this branch for a `delta-re-review` after new commits or a `same-head-follow
    Work independently of the pull request description and existing CI results.
    Identify the highest-risk behavior added or changed since `<prior_sha>`.
    Check whether that behavior fails in normal use, or whether tests could pass while documented behavior still fails.
-   Report rare or contrived cases in the fix as non-blocking notes.
+   Classify each finding with the blocking bar in `SKILL.md`.
+   Report rare or contrived cases in the fix as non-blocking notes, unless they have a security, data-loss, or required-check impact.
    Done when each changed behavior that normal use reaches is verified.
+
+## Review rounds
+
+The run context gives the number of your earlier change requests on this pull request.
+When that number is 2 or more, keep the review on the fixes and the newest changes.
+In that case, block only for a prior blocking finding that is not fixed, or for a new finding that meets the blocking bar.

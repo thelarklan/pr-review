@@ -39,26 +39,22 @@ Review one pull request in a prepared checkout and submit one evidence-backed Gi
 
 ## Blocking bar
 
-A finding is blocking when at least one of these conditions is true:
+Classify each finding in this order:
 
-- A user or a scheduled job meets the defect in normal use or with a likely configuration.
-- The defect causes a security risk, for example a leaked secret, a permission bypass, or unsafe shell input.
-- The defect can lose or corrupt data.
-- A required build, test, or check fails, or a documented behavior fails in normal use.
+1. A finding is blocking if it has one of these impacts, however rare the trigger:
+   - A security risk, for example a leaked secret, a permission bypass, or unsafe shell input.
+   - Data that can be lost or corrupted.
+   - A required build, test, or check that fails.
+2. Otherwise, a finding is blocking if a user or a scheduled job meets it in normal use or with a likely configuration.
+   This includes a documented behavior that fails in normal use.
+3. All other findings are non-blocking. These are examples:
+   - The failure needs a contrived setup, for example an unusual manual edit of a managed file, crontab, or config.
+   - The failure needs a narrow race between independent processes.
+   - No realistic input reaches an untested path.
+   - The finding is about style, names, or a cleaner design.
 
-All other findings are non-blocking. These are examples of non-blocking findings:
-
-- The failure needs a contrived setup, for example an unusual manual edit of a managed file, crontab, or config.
-- The failure needs a narrow race between independent processes, without data loss or a security risk.
-- No realistic input reaches an untested path.
-- The finding is about style, names, or a cleaner design.
-
-If you are not sure, ask: "Will the owner meet this failure in normal use of the tool?"
+For step 2, if you are not sure, ask: "Will the owner meet this failure in normal use of the tool?"
 If the answer is no, the finding is non-blocking.
-
-The run context gives the number of your earlier change requests on this pull request.
-When that number is 2 or more, keep the review on the fixes and the newest changes.
-In that case, block only for a prior blocking finding that is not fixed, or for a new defect that meets the bar.
 
 ## Hard limits
 
